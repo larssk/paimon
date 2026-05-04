@@ -283,7 +283,7 @@ public class Schema {
 
         @Nullable private String comment;
 
-        private final AtomicInteger highestFieldId = new AtomicInteger(-1);
+        private final AtomicInteger highestFieldId = new AtomicInteger(0); // Start at 0 so first incrementAndGet() yields 1 (Iceberg requires field IDs >= 1)
 
         public int getHighestFieldId() {
             return highestFieldId.get();

@@ -193,7 +193,7 @@ public class IcebergOptions {
     }
 
     public int previousVersionsMax() {
-        return options.get(METADATA_PREVIOUS_VERSIONS_MAX);
+        return Math.max(1, options.get(METADATA_PREVIOUS_VERSIONS_MAX));
     }
 
     /** Where to store Iceberg metadata. */

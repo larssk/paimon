@@ -395,6 +395,13 @@ public class IcebergRestMetadataCommitter implements IcebergMetadataCommitter {
 
         // if the iceberg table is existed, check whether the current metadata of the table is the
         // base of the new table metadata, we use current snapshot id to check
+
+        // guard against tables with no snapshots (e.g. freshly created or recreated after a
+        // failed/restarted commit — the Iceberg table exists but has no snapshot yet)
+        if (currentMetadata.currentSnapshot() == null || newMetadata.currentSnapshot() == null) {
+            return false;
+        }
+
         return currentMetadata.currentSnapshot().snapshotId()
                 == newMetadata.currentSnapshot().snapshotId() - 1;
     }
