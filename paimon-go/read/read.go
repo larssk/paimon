@@ -14,6 +14,7 @@ import (
 
 	"github.com/apache/paimon/paimon-go/internal/binaryrow"
 	"github.com/apache/paimon/paimon-go/manifest"
+	"github.com/apache/paimon/paimon-go/predicate"
 	"github.com/apache/paimon/paimon-go/schema"
 )
 
@@ -125,6 +126,15 @@ func (r *splitRecordReader) Next() bool {
 				if err != nil {
 					r.currentErr = err
 					return false
+				}
+				// Row-level filter: discard non-matching rows.
+				if r.tr.rb.filter != nil {
+					filtered := filterBatch(r.tr.rb.filter, projected, r.alloc)
+					projected.Release()
+					if filtered == nil {
+						continue // all rows filtered out; advance to next batch
+					}
+					projected = filtered
 				}
 				r.current = projected
 				return true
@@ -383,4 +393,198 @@ func (m *memReaderAt) Seek(offset int64, whence int) (int64, error) {
 	return abs, nil
 }
 
-// ensure unused import is used
+// filterBatch returns a new RecordBatch containing only the rows for which p
+// evaluates to true. Returns nil if no rows match. If all rows match the
+// original batch is retained and returned unchanged (no copy).
+func filterBatch(p *predicate.Predicate, rec arrow.RecordBatch, alloc memory.Allocator) arrow.RecordBatch {
+	n := int(rec.NumRows())
+	if n == 0 {
+		return nil
+	}
+
+	// Build selection mask.
+	sel := make([]bool, n)
+	matchCount := 0
+	for i := 0; i < n; i++ {
+		if predicate.EvalRow(p, rec, i) {
+			sel[i] = true
+			matchCount++
+		}
+	}
+	if matchCount == 0 {
+		return nil
+	}
+	if matchCount == n {
+		rec.Retain()
+		return rec
+	}
+
+	// Compact: copy selected rows into new arrays.
+	s := rec.Schema()
+	cols := make([]arrow.Array, rec.NumCols())
+	for ci := 0; ci < int(rec.NumCols()); ci++ {
+		src := rec.Column(ci)
+		cols[ci] = compactColumn(src, sel, matchCount, alloc)
+	}
+	defer func() {
+		for _, c := range cols {
+			if c != nil {
+				c.Release()
+			}
+		}
+	}()
+	return array.NewRecord(s, cols, int64(matchCount))
+}
+
+// compactColumn copies the rows indicated by sel into a new array.
+func compactColumn(src arrow.Array, sel []bool, matchCount int, alloc memory.Allocator) arrow.Array {
+	switch c := src.(type) {
+	case *array.Boolean:
+		b := array.NewBooleanBuilder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.Int8:
+		b := array.NewInt8Builder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.Int16:
+		b := array.NewInt16Builder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.Int32:
+		b := array.NewInt32Builder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.Int64:
+		b := array.NewInt64Builder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.Float32:
+		b := array.NewFloat32Builder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.Float64:
+		b := array.NewFloat64Builder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.String:
+		b := array.NewStringBuilder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.LargeString:
+		b := array.NewLargeStringBuilder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.Timestamp:
+		dt := src.DataType().(*arrow.TimestampType)
+		b := array.NewTimestampBuilder(alloc, dt)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	case *array.Date32:
+		b := array.NewDate32Builder(alloc)
+		b.Reserve(matchCount)
+		for i, ok := range sel {
+			if ok {
+				if c.IsNull(i) {
+					b.AppendNull()
+				} else {
+					b.Append(c.Value(i))
+				}
+			}
+		}
+		return b.NewArray()
+	default:
+		// Unsupported type: return a null array of the same length as a safe fallback.
+		return array.MakeArrayOfNull(alloc, src.DataType(), matchCount)
+	}
+}

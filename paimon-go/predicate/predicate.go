@@ -9,6 +9,8 @@ package predicate
 import (
 	"fmt"
 
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/apache/paimon/paimon-go/internal/binaryrow"
 	"github.com/apache/paimon/paimon-go/manifest"
 	"github.com/apache/paimon/paimon-go/schema"
@@ -394,5 +396,141 @@ func rebind(p *Predicate, idx map[string]int) *Predicate {
 		clone := *p
 		clone.FieldIdx = newIdx
 		return &clone
+	}
+}
+
+// --- Row-level evaluation ---
+
+// EvalRow evaluates a predicate against a single row of an Arrow RecordBatch.
+// p.FieldIdx must be bound to the column indices of rec (i.e. the read/projected schema).
+func EvalRow(p *Predicate, rec arrow.RecordBatch, row int) bool {
+	if p == nil {
+		return true
+	}
+	switch p.Op {
+	case OpAnd:
+		for _, c := range p.Children {
+			if !EvalRow(c, rec, row) {
+				return false
+			}
+		}
+		return true
+	case OpOr:
+		for _, c := range p.Children {
+			if EvalRow(c, rec, row) {
+				return true
+			}
+		}
+		return false
+	case OpNot:
+		if len(p.Children) == 0 {
+			return true
+		}
+		return !EvalRow(p.Children[0], rec, row)
+	}
+
+	// Leaf predicate — bounds check first.
+	if p.FieldIdx < 0 || p.FieldIdx >= int(rec.NumCols()) {
+		return true // unknown column: conservative keep
+	}
+	col := rec.Column(p.FieldIdx)
+
+	if p.Op == OpIsNull {
+		return col.IsNull(row)
+	}
+	if p.Op == OpIsNotNull {
+		return col.IsValid(row)
+	}
+
+	// For comparison ops a null value never matches.
+	if col.IsNull(row) {
+		return false
+	}
+	val := arrowValue(col, row)
+
+	switch p.Op {
+	case OpEqual:
+		if len(p.Literals) == 0 {
+			return true
+		}
+		return compare(p.Literals[0], val) == 0
+	case OpNotEqual:
+		if len(p.Literals) == 0 {
+			return true
+		}
+		return compare(p.Literals[0], val) != 0
+	case OpLessThan:
+		if len(p.Literals) == 0 {
+			return true
+		}
+		// literal < val  ↔  val > literal  ↔  compare(literal, val) < 0
+		return compare(p.Literals[0], val) < 0
+	case OpLessOrEqual:
+		if len(p.Literals) == 0 {
+			return true
+		}
+		return compare(p.Literals[0], val) <= 0
+	case OpGreaterThan:
+		if len(p.Literals) == 0 {
+			return true
+		}
+		return compare(p.Literals[0], val) > 0
+	case OpGreaterOrEqual:
+		if len(p.Literals) == 0 {
+			return true
+		}
+		return compare(p.Literals[0], val) >= 0
+	case OpIn:
+		for _, lit := range p.Literals {
+			if compare(lit, val) == 0 {
+				return true
+			}
+		}
+		return false
+	}
+	return true
+}
+
+// arrowValue extracts the Go value at position row from an Arrow array.
+// Returns nil for null entries (callers should check IsNull first).
+func arrowValue(col arrow.Array, row int) interface{} {
+	if col.IsNull(row) {
+		return nil
+	}
+	switch c := col.(type) {
+	case *array.Boolean:
+		return c.Value(row)
+	case *array.Int8:
+		return c.Value(row)
+	case *array.Int16:
+		return c.Value(row)
+	case *array.Int32:
+		return c.Value(row)
+	case *array.Int64:
+		return c.Value(row)
+	case *array.Uint8:
+		return c.Value(row)
+	case *array.Uint16:
+		return c.Value(row)
+	case *array.Uint32:
+		return c.Value(row)
+	case *array.Uint64:
+		return c.Value(row)
+	case *array.Float32:
+		return c.Value(row)
+	case *array.Float64:
+		return c.Value(row)
+	case *array.String:
+		return c.Value(row)
+	case *array.LargeString:
+		return c.Value(row)
+	case *array.Date32:
+		return int32(c.Value(row))
+	case *array.Date64:
+		return int64(c.Value(row))
+	case *array.Timestamp:
+		return int64(c.Value(row))
+	default:
+		return nil
 	}
 }
