@@ -27,15 +27,25 @@ type Plan struct {
 
 // ReadBuilder is the entry point for building a table scan + read pipeline.
 type ReadBuilder struct {
-	tbl        *table.FileStoreTable
-	filter     *predicate.Predicate
-	projection []string // nil = all columns
-	limit      int64    // 0 = no limit
+	tbl            Table
+	manifestReader ManifestReader
+	filter         *predicate.Predicate
+	projection     []string // nil = all columns
+	limit          int64    // 0 = no limit
 }
 
 // NewReadBuilder creates a ReadBuilder for the given table.
 func NewReadBuilder(tbl *table.FileStoreTable) *ReadBuilder {
-	return &ReadBuilder{tbl: tbl}
+	return &ReadBuilder{
+		tbl:            tbl,
+		manifestReader: newDefaultManifestReader(tbl.ManifestDir(), tbl.GetIO()),
+	}
+}
+
+// newReadBuilderFromIface creates a ReadBuilder using the Table interface directly.
+// Used internally and in tests.
+func newReadBuilderFromIface(tbl Table, mr ManifestReader) *ReadBuilder {
+	return &ReadBuilder{tbl: tbl, manifestReader: mr}
 }
 
 // WithFilter attaches a filter predicate.
@@ -73,12 +83,13 @@ func (rb *ReadBuilder) NewRead() *TableRead {
 
 // readFields returns the effective read schema (all fields or projected subset).
 func (rb *ReadBuilder) readFields() []schema.DataField {
+	s := rb.tbl.GetSchema()
 	if len(rb.projection) == 0 {
-		return rb.tbl.Schema.Fields
+		return s.Fields
 	}
 	var fields []schema.DataField
 	for _, name := range rb.projection {
-		if f, ok := rb.tbl.Schema.FieldByName(name); ok {
+		if f, ok := s.FieldByName(name); ok {
 			fields = append(fields, f)
 		}
 	}
@@ -96,21 +107,23 @@ type TableScan struct {
 // and returns a Plan of DataSplits ready for reading.
 func (ts *TableScan) Plan(ctx context.Context) (*Plan, error) {
 	tbl := ts.rb.tbl
+	mr := ts.rb.manifestReader
+	s := tbl.GetSchema()
 
 	snap, err := tbl.LatestSnapshot(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("scan: latest snapshot: %w", err)
 	}
 
-	partFields := tbl.Schema.PartitionFields()
-	valueFields := tbl.Schema.Fields
+	partFields := s.PartitionFields()
+	valueFields := s.Fields
 
 	// Read base + delta manifest lists.
-	baseList, err := manifest.ReadManifestList(ctx, tbl.IO, tbl.Paths.ManifestDir(), snap.BaseManifestList, partFields)
+	baseList, err := mr.ReadList(ctx, snap.BaseManifestList, partFields)
 	if err != nil {
 		return nil, fmt.Errorf("scan: base manifest list: %w", err)
 	}
-	deltaList, err := manifest.ReadManifestList(ctx, tbl.IO, tbl.Paths.ManifestDir(), snap.DeltaManifestList, partFields)
+	deltaList, err := mr.ReadList(ctx, snap.DeltaManifestList, partFields)
 	if err != nil {
 		return nil, fmt.Errorf("scan: delta manifest list: %w", err)
 	}
@@ -121,7 +134,7 @@ func (ts *TableScan) Plan(ctx context.Context) (*Plan, error) {
 	prunedMeta := ts.pruneManifestFiles(allMeta)
 
 	// Read all manifest entries in parallel.
-	entries, err := manifest.ReadAllEntries(ctx, tbl.IO, tbl.Paths.ManifestDir(), prunedMeta, partFields, valueFields)
+	entries, err := mr.ReadAllEntries(ctx, prunedMeta, partFields, valueFields)
 	if err != nil {
 		return nil, fmt.Errorf("scan: read manifest entries: %w", err)
 	}
@@ -156,7 +169,7 @@ func (ts *TableScan) pruneEntries(entries []manifest.ManifestEntry) []manifest.M
 	result := entries[:0]
 	for _, e := range entries {
 		// Rebind predicate to value field indices for this file's stats.
-		p := predicate.WithProjection(ts.rb.filter, ts.rb.tbl.Schema.Fields)
+		p := predicate.WithProjection(ts.rb.filter, ts.rb.tbl.GetSchema().Fields)
 		if predicate.TestByStats(p, e.File.ValueStats, e.File.RowCount) {
 			result = append(result, e)
 		}

@@ -117,6 +117,20 @@ func (t *FileStoreTable) LatestSnapshot(ctx context.Context) (*snapshot.Snapshot
 	return t.snapshotMgr.Latest(ctx)
 }
 
+// GetSchema returns the current table schema (satisfies read.Table interface).
+func (t *FileStoreTable) GetSchema() *schema.TableSchema { return t.Schema }
+
+// ManifestDir returns the manifest directory path (satisfies read.Table interface).
+func (t *FileStoreTable) ManifestDir() string { return t.Paths.ManifestDir() }
+
+// GetIO returns the FileIO (satisfies read.Table interface).
+func (t *FileStoreTable) GetIO() fileio.FileIO { return t.IO }
+
+// DataFilePath builds an absolute data file path (satisfies read.Table interface).
+func (t *FileStoreTable) DataFilePath(partition *binaryrow.BinaryRow, partFields []schema.DataField, bucket int, fileName string) string {
+	return t.Paths.DataFilePath(partition, partFields, bucket, fileName)
+}
+
 // SchemaForID returns the table schema for a specific schema ID.
 func (t *FileStoreTable) SchemaForID(ctx context.Context, id int64) (*schema.TableSchema, error) {
 	if id == t.Schema.ID {

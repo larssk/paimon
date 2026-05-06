@@ -17,6 +17,7 @@ import (
 	"github.com/apache/paimon/paimon-go/schema"
 )
 
+
 // TableRead executes the read of splits and produces Arrow data.
 type TableRead struct {
 	rb *ReadBuilder
@@ -161,9 +162,9 @@ func (r *splitRecordReader) openFile(split DataSplit, fm manifest.DataFileMeta) 
 		if split.Partition != nil {
 			partRow = split.Partition.Partition
 		}
-		filePath = tbl.Paths.DataFilePath(
+		filePath = tbl.DataFilePath(
 			partRow,
-			tbl.Schema.PartitionFields(),
+			tbl.GetSchema().PartitionFields(),
 			split.Bucket,
 			fm.FileName,
 		)
@@ -173,7 +174,7 @@ func (r *splitRecordReader) openFile(split DataSplit, fm manifest.DataFileMeta) 
 		return fmt.Errorf("read: unsupported file format for %q (only parquet supported in v1)", filePath)
 	}
 
-	rc, err := tbl.IO.Open(r.ctx, filePath)
+	rc, err := tbl.GetIO().Open(r.ctx, filePath)
 	if err != nil {
 		return fmt.Errorf("read: open %s: %w", filePath, err)
 	}
