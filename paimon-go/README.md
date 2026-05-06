@@ -6,53 +6,122 @@ A minimalistic, pure-Go reader for [Apache Paimon](https://paimon.apache.org/) t
 
 Early development — read-only, append-only tables, Parquet data files only.
 
-## Features
+## What is included
 
-- Filesystem catalog (local path or GCS)
-- Latest snapshot resolution
-- Manifest-list + manifest-entry reading (Avro)
-- Partition and column statistics-based file pruning
-- Column projection
-- Output as Apache Arrow `RecordReader` or `arrow.Table`
-- Predicate builder for filter push-down
+### Storage backends
 
-## Not yet supported
+| Backend | Notes |
+|---|---|
+| Local filesystem | `os.*` — always available |
+| Google Cloud Storage | via `cloud.google.com/go/storage`; ADC or explicit service-account key |
 
-- ORC data files (Paimon default format — requires `file.format=parquet` in table options)
-- Primary-key (merge-on-read) tables
-- Deletion vectors
-- Schema evolution across data files
-- Streaming / incremental scans
-- REST catalog
-- Write path
+### Catalog
 
-## Installation
+- **Filesystem catalog** — resolves tables from a warehouse directory using the convention `<warehouse>/<database>.db/<table>`
+- `ListDatabases`, `ListTables`, `GetTable`
+
+### Metadata reading
+
+- **Snapshot resolution** — reads `snapshot/snapshot-<id>` JSON files; always picks the latest snapshot
+- **Schema parsing** — reads `schema/schema-<id>` JSON files; handles both plain-string types (`"INT NOT NULL"`, `"VARCHAR(255)"`) and object types (`{"type":"ARRAY","element":"BIGINT"}`); full Paimon type system including DECIMAL precision/scale, TIMESTAMP precision, nested ARRAY / MAP / ROW
+- **Manifest list** — reads `manifest/manifest-list-*` Avro files → `[]ManifestFileMeta` with partition statistics
+- **Manifest entries** — reads `manifest/manifest-*` Avro files in parallel (up to 8 goroutines) → resolves ADD/DELETE pairs → `[]ManifestEntry` with per-file statistics and metadata
+- **BinaryRow decoder** — decodes Paimon's compact binary row format (used for partition min/max statistics); supports all atomic types including inline and heap-allocated strings
+
+### Read pipeline
+
+- `ReadBuilder` — entry point; attach filter predicate and/or column projection
+- `TableScan.Plan()` — prunes manifest files and individual data files using partition and column statistics (stats-based pruning via BinaryRow decoded on demand)
+- `TableRead.ToArrowReader()` — streams `arrow.RecordBatch` chunks (65 536 rows per batch)
+- `TableRead.ToArrow()` — convenience method returning a single `arrow.Table`
+- **Column projection** — only requested columns are read from Parquet
+- **Schema evolution / missing columns** — columns present in the schema but absent from a given Parquet file are returned as null arrays
+- **Type compatibility** — handles minor Arrow type mismatches between file physical type and schema type (e.g. `timestamp[us]` vs `timestamp[us, tz=UTC]`)
+
+### Predicate / filter
+
+- `PredicateBuilder` — builds typed predicates: `Equal`, `NotEqual`, `LessThan`, `LessOrEqual`, `GreaterThan`, `GreaterOrEqual`, `IsNull`, `IsNotNull`, `In`
+- Logical combinators: `And`, `Or`, `Not`
+- **Stats-based pruning** at both manifest-file level (partition stats) and data-file level (column value stats)
+- Predicate index rebinding when used with column projection
+
+### Output formats
+
+| Method | Returns |
+|---|---|
+| `ToArrowReader()` | `array.RecordReader` — streaming batches |
+| `ToArrow()` | `arrow.Table` — all data in memory |
+
+### Data file formats
+
+| Format | Status |
+|---|---|
+| Parquet | Supported (`.parquet`, all common compressions via `apache/arrow-go`) |
+| ORC | Not supported |
+| Avro (data files) | Not supported |
+| Lance / Vortex / Blob | Not supported |
+
+> **Note:** Paimon's default file format is ORC. To use this library, tables must be written with `'file.format' = 'parquet'`.
+
+---
+
+## What is out of scope (v1)
+
+### Table types
+
+- **Primary-key (merge-on-read) tables** — requires sort-merge deduplication across files within a bucket, sequence number ordering, and UPDATE_BEFORE / UPDATE_AFTER / DELETE row-kind handling
+- **Deletion vectors** — an alternative compaction strategy for primary-key tables
+
+### Catalog and metadata
+
+- **REST catalog** — only the filesystem catalog is implemented
+- **Tag-based and timestamp-based time travel** — only the latest snapshot is resolved
+- **Streaming / incremental scans** — no `StreamReadBuilder`, no watermark tracking
+- **Schema evolution (type changes)** — columns added after table creation are null-filled correctly, but type changes are not handled
+- **Index files** — BTree / full-text / vector global indexes are not read
+
+### Data formats
+
+- **ORC** — Paimon's default; thin Go library support requires CGO or a separate implementation
+- **Avro data files** — manifest Avro is supported, but Avro as a data file format is not
+- **Lance / Vortex / Blob** — no stable Go equivalents
+
+### Storage
+
+- **S3 / S3-compatible** (MinIO, etc.) — not yet wired up; straightforward addition via `gocloud.dev/blob` or AWS SDK v2
+- **HDFS** — requires CGO or WebHDFS REST
+
+### Write path
+
+- No `TableWrite`, `FileStoreCommit`, or any mutation operations
+
+---
+
+## Dependencies
+
+| Package | Purpose |
+|---|---|
+| `github.com/apache/arrow-go/v18` | Arrow in-memory format + Parquet reader |
+| `github.com/hamba/avro/v2` | Read manifest-list and manifest-entry Avro files |
+| `cloud.google.com/go/storage` | GCS storage backend |
+
+---
+
+## Quick start
 
 ```sh
 go get github.com/apache/paimon/paimon-go
 ```
 
-## Usage
-
-### Local filesystem
-
 ```go
-import (
-    "context"
-    "github.com/apache/paimon/paimon-go"
-    "github.com/apache/paimon/paimon-go/read"
-)
-
 ctx := context.Background()
 
 cat, err := paimon.NewCatalog(ctx, paimon.Options{
-    Warehouse: "/path/to/warehouse",
+    Warehouse: "gs://my-bucket/warehouse", // or a local path
 })
 tbl, err := cat.GetTable(ctx, "mydb", "mytable")
 
-rb := read.NewReadBuilder(tbl).
-    WithProjection([]string{"event_time", "user_id", "amount"})
-
+rb := read.NewReadBuilder(tbl)
 plan, err := rb.NewScan().Plan(ctx)
 
 reader, err := rb.NewRead().ToArrowReader(ctx, plan.Splits)
@@ -65,35 +134,28 @@ for reader.Next() {
 }
 ```
 
-### GCS
+## Example program
 
-```go
-cat, err := paimon.NewCatalog(ctx, paimon.Options{
-    Warehouse: "gs://my-bucket/warehouse",
-    FileIOOptions: []paimon.FileIOOption{
-        paimon.WithCredentialsFile("/path/to/sa.json"),
-    },
-})
+A ready-to-run example that prints schema and rows to stdout is available at
+`examples/read_table/`:
+
+```sh
+# Local
+go run ./examples/read_table \
+  --warehouse /path/to/warehouse \
+  --database mydb \
+  --table mytable \
+  --limit 100
+
+# GCS
+go run ./examples/read_table \
+  --warehouse gs://my-bucket/warehouse \
+  --database mydb \
+  --table mytable \
+  --gcs-creds /path/to/sa.json
 ```
 
-### With filter
-
-```go
-rb := read.NewReadBuilder(tbl)
-pb := rb.NewPredicateBuilder()
-
-filter, err := pb.GreaterOrEqual("event_date", int32(20240101))
-
-plan, err := rb.WithFilter(filter).NewScan().Plan(ctx)
-```
-
-### Read as arrow.Table
-
-```go
-tbl, err := rb.NewRead().ToArrow(ctx, plan.Splits)
-```
-
-## Architecture
+## Module layout
 
 ```
 paimon-go/
@@ -107,30 +169,6 @@ paimon-go/
 ├── read/                   # ReadBuilder, TableScan, TableRead, Parquet reader
 ├── predicate/              # Predicate, PredicateBuilder, stats pruning
 └── internal/
-    └── binaryrow/          # Paimon BinaryRow binary format decoder
+    ├── binaryrow/          # Paimon BinaryRow binary format decoder
+    └── pathutil/           # URI-safe path joining (handles gs://, s3://)
 ```
-
-### Read pipeline
-
-```
-NewCatalog → GetTable → NewReadBuilder
-    → NewScan().Plan(ctx)
-        resolves latest snapshot (JSON)
-        reads manifest-list (Avro) → []ManifestFileMeta
-        reads manifest entries in parallel (Avro) → []ManifestEntry
-        prunes files by partition + column stats (BinaryRow decoded on demand)
-        returns Plan{[]DataSplit}
-    → NewRead().ToArrowReader(ctx, plan.Splits)
-        for each split: opens Parquet file via FileIO
-        applies column projection
-        fills missing columns with null arrays (schema evolution)
-        yields arrow.RecordBatch chunks (65 536 rows default)
-```
-
-## Dependencies
-
-| Package | Purpose |
-|---|---|
-| `github.com/apache/arrow-go/v18` | Arrow in-memory format + Parquet reader |
-| `github.com/hamba/avro/v2` | Read manifest Avro files |
-| `cloud.google.com/go/storage` | GCS storage backend |
