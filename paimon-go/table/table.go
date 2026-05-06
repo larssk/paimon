@@ -117,6 +117,16 @@ func (t *FileStoreTable) LatestSnapshot(ctx context.Context) (*snapshot.Snapshot
 	return t.snapshotMgr.Latest(ctx)
 }
 
+// SnapshotByID returns the snapshot for a specific ID (satisfies read.Table interface).
+func (t *FileStoreTable) SnapshotByID(ctx context.Context, id int64) (*snapshot.Snapshot, error) {
+	return t.snapshotMgr.Read(ctx, id)
+}
+
+// ListSnapshotIDs returns all available snapshot IDs in ascending order (satisfies read.Table interface).
+func (t *FileStoreTable) ListSnapshotIDs(ctx context.Context) ([]int64, error) {
+	return t.snapshotMgr.ListIDs(ctx)
+}
+
 // GetSchema returns the current table schema (satisfies read.Table interface).
 func (t *FileStoreTable) GetSchema() *schema.TableSchema { return t.Schema }
 

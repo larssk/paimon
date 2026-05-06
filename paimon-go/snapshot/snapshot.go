@@ -63,11 +63,22 @@ func (m *Manager) snapshotDir() string {
 
 // Latest returns the snapshot with the highest ID.
 func (m *Manager) Latest(ctx context.Context) (*Snapshot, error) {
+	ids, err := m.ListIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("snapshot: no snapshots found in %s", m.snapshotDir())
+	}
+	return m.Read(ctx, ids[len(ids)-1])
+}
+
+// ListIDs returns all available snapshot IDs in ascending order.
+func (m *Manager) ListIDs(ctx context.Context) ([]int64, error) {
 	entries, err := m.io.List(ctx, m.snapshotDir())
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: list dir: %w", err)
 	}
-
 	var ids []int64
 	for _, e := range entries {
 		if e.IsDir {
@@ -83,11 +94,8 @@ func (m *Manager) Latest(ctx context.Context) (*Snapshot, error) {
 		}
 		ids = append(ids, id)
 	}
-	if len(ids) == 0 {
-		return nil, fmt.Errorf("snapshot: no snapshots found in %s", m.snapshotDir())
-	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	return m.Read(ctx, ids[len(ids)-1])
+	return ids, nil
 }
 
 // Read loads a specific snapshot by ID.
@@ -114,23 +122,12 @@ func (m *Manager) EarliestID(ctx context.Context) (int64, error) {
 			return id, nil
 		}
 	}
-	entries, err := m.io.List(ctx, m.snapshotDir())
+	ids, err := m.ListIDs(ctx)
 	if err != nil {
 		return -1, err
 	}
-	var min int64 = -1
-	for _, e := range entries {
-		name := pathutil.Base(e.Path)
-		if !strings.HasPrefix(name, snapshotPrefix) {
-			continue
-		}
-		id, err := strconv.ParseInt(name[len(snapshotPrefix):], 10, 64)
-		if err != nil {
-			continue
-		}
-		if min < 0 || id < min {
-			min = id
-		}
+	if len(ids) == 0 {
+		return -1, nil
 	}
-	return min, nil
+	return ids[0], nil
 }

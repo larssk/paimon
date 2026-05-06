@@ -5,8 +5,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -28,6 +31,10 @@ func main() {
 	filterCol := flag.String("filter-col", "", "Column name to filter on")
 	filterOp  := flag.String("filter-op", "eq", "Filter operator: eq, ne, lt, le, gt, ge, in")
 	filterVal := flag.String("filter-val", "", "Filter value; comma-separated list for 'in'")
+
+	stream       := flag.Bool("stream", false, "Enable continuous stream mode (polls for new snapshots)")
+	pollInterval := flag.Duration("poll", 2*time.Second, "Poll interval in stream mode (e.g. 5s, 500ms)")
+	fromEarliest := flag.Bool("from-earliest", false, "In stream mode, replay all existing snapshots first")
 	flag.Parse()
 
 	if *warehouse == "" || *tblName == "" {
@@ -62,13 +69,20 @@ func main() {
 		rb = rb.WithLimit(*limit)
 	}
 
+	var filter *predicate.Predicate
 	if *filterCol != "" {
 		p, err := buildFilter(tbl, *filterCol, *filterOp, *filterVal)
 		if err != nil {
 			log.Fatalf("build filter: %v", err)
 		}
+		filter = p
 		rb = rb.WithFilter(p)
 		fmt.Printf("filter:    %s %s %s\n", *filterCol, *filterOp, *filterVal)
+	}
+
+	if *stream {
+		runStream(ctx, tbl, filter, *pollInterval, *fromEarliest)
+		return
 	}
 
 	plan, err := rb.NewScan().Plan(ctx)
@@ -112,6 +126,47 @@ func main() {
 	}
 
 	fmt.Printf("\n%d row(s)\n", totalRows)
+}
+
+// runStream runs a continuous stream read, printing each new row as it arrives.
+// It blocks until the context is cancelled (Ctrl-C).
+func runStream(ctx context.Context, tbl *table.FileStoreTable, filter *predicate.Predicate, poll time.Duration, fromEarliest bool) {
+	sb := read.NewStreamReadBuilder(tbl).WithPollInterval(poll)
+	if filter != nil {
+		sb = sb.WithFilter(filter)
+	}
+	if fromEarliest {
+		sb = sb.WithStartingFrom(read.StartingFromEarliest)
+		fmt.Println("mode:      stream (from-earliest)")
+	} else {
+		fmt.Println("mode:      stream (from-latest)")
+	}
+	fmt.Printf("poll:      %s\n", poll)
+
+	// Handle Ctrl-C gracefully.
+	ctx, cancel := withSignal(ctx)
+	defer cancel()
+
+	rdr := read.NewStreamReader(ctx, sb)
+	defer rdr.Release()
+
+	fmt.Printf("schema:    %s\n\n", formatSchema(rdr.Schema()))
+
+	var totalRows int64
+	for rdr.Next() {
+		batch := rdr.RecordBatch()
+		snapID := rdr.SnapshotID()
+		nRows := batch.NumRows()
+		for row := int64(0); row < nRows; row++ {
+			fmt.Printf("[snap=%d] %s\n", snapID, formatRow(batch, row))
+			totalRows++
+		}
+		batch.Release()
+	}
+	if err := rdr.Err(); err != nil && err != context.Canceled {
+		log.Fatalf("stream error: %v", err)
+	}
+	fmt.Printf("\n%d row(s) received\n", totalRows)
 }
 
 // buildFilter constructs a Predicate from the --filter-* flags.
@@ -289,6 +344,22 @@ func formatValue(col arrow.Array, row int64) string {
 	default:
 		return fmt.Sprintf("%v", col)
 	}
+}
+
+// withSignal returns a context that is cancelled on SIGINT or SIGTERM (Ctrl-C).
+func withSignal(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		select {
+		case <-ch:
+			fmt.Fprintln(os.Stderr, "\ninterrupted")
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 

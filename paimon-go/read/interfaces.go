@@ -14,6 +14,8 @@ import (
 // *table.FileStoreTable satisfies this interface.
 type Table interface {
 	LatestSnapshot(ctx context.Context) (*snapshot.Snapshot, error)
+	SnapshotByID(ctx context.Context, id int64) (*snapshot.Snapshot, error)
+	ListSnapshotIDs(ctx context.Context) ([]int64, error)
 	GetSchema() *schema.TableSchema
 	ManifestDir() string
 	GetIO() fileio.FileIO

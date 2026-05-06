@@ -67,6 +67,12 @@ type readTable struct {
 func (r *readTable) LatestSnapshot(_ context.Context) (*snapshot.Snapshot, error) {
 	return makeSnap(1), nil
 }
+func (r *readTable) SnapshotByID(_ context.Context, _ int64) (*snapshot.Snapshot, error) {
+	return makeSnap(1), nil
+}
+func (r *readTable) ListSnapshotIDs(_ context.Context) ([]int64, error) {
+	return []int64{1}, nil
+}
 func (r *readTable) GetSchema() *schema.TableSchema { return r.sch }
 func (r *readTable) ManifestDir() string            { return "manifest" }
 func (r *readTable) GetIO() fileio.FileIO           { return r.io }

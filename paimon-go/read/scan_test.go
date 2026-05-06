@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/apache/paimon/paimon-go/fileio"
@@ -27,6 +28,20 @@ type stubTable struct {
 
 func (s *stubTable) LatestSnapshot(_ context.Context) (*snapshot.Snapshot, error) {
 	return s.snap, s.snapErr
+}
+
+func (s *stubTable) SnapshotByID(_ context.Context, id int64) (*snapshot.Snapshot, error) {
+	if s.snap != nil && s.snap.ID == id {
+		return s.snap, nil
+	}
+	return nil, fmt.Errorf("snapshot %d not found", id)
+}
+
+func (s *stubTable) ListSnapshotIDs(_ context.Context) ([]int64, error) {
+	if s.snap == nil {
+		return nil, nil
+	}
+	return []int64{s.snap.ID}, nil
 }
 
 func (s *stubTable) GetSchema() *schema.TableSchema { return s.sch }
