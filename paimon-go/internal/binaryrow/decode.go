@@ -55,6 +55,10 @@ func New(data []byte) (*BinaryRow, error) {
 // Arity returns the number of fields.
 func (r *BinaryRow) Arity() int { return r.arity }
 
+// Bytes returns the raw bytes of the BinaryRow (including the 4-byte arity prefix).
+// The returned slice shares the underlying array; do not modify it.
+func (r *BinaryRow) Bytes() []byte { return r.raw }
+
 // RowKind returns the row kind encoded in the first byte of the bit-set.
 func (r *BinaryRow) RowKind() RowKind {
 	if len(r.actual) == 0 {

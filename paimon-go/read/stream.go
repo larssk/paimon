@@ -321,7 +321,10 @@ func NewStreamReader(ctx context.Context, sb *StreamReadBuilder) *TableStreamRea
 
 func (r *TableStreamReader) Schema() *arrow.Schema {
 	fields := r.read.readFields()
-	s, _ := schema.ToArrowSchema(fields)
+	s, err := schema.ToArrowSchema(fields)
+	if err != nil {
+		panic(fmt.Sprintf("stream: build Arrow schema: %v", err))
+	}
 	return s
 }
 

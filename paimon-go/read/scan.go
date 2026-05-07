@@ -3,6 +3,7 @@ package read
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 
 	"github.com/apache/paimon/paimon-go/manifest"
@@ -204,12 +205,13 @@ func (ts *TableScan) buildSplits(entries []manifest.ManifestEntry) []DataSplit {
 	return splits
 }
 
-// partitionKey returns a string key for grouping entries by partition.
+// partitionKey returns a string key that uniquely identifies a partition.
 // For unpartitioned tables all entries share the same (empty) key.
+// Uses the raw partition bytes (hex-encoded) so that two entries with the same
+// number of partition columns but different values are never grouped together.
 func partitionKey(e manifest.ManifestEntry) string {
 	if e.Partition == nil {
 		return ""
 	}
-	// Use a simple arity+bucket combo as a cheap key.
-	return fmt.Sprintf("arity=%d", e.Partition.Arity())
+	return hex.EncodeToString(e.Partition.Bytes())
 }

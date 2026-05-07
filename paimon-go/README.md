@@ -38,6 +38,14 @@ Early development — read-only, append-only tables, Parquet data files only.
 - **Schema evolution / missing columns** — columns present in the schema but absent from a given Parquet file are returned as null arrays
 - **Type compatibility** — handles minor Arrow type mismatches between file physical type and schema type (e.g. `timestamp[us]` vs `timestamp[us, tz=UTC]`)
 
+### Streaming read
+
+- `StreamReadBuilder` — entry point for continuous reads; attach filter, projection, poll interval, and starting position
+- `TableStream.Next()` — blocks until a new `APPEND` snapshot appears; returns splits for only the newly added files in that commit; skips `COMPACT` / `OVERWRITE` / `ANALYZE` snapshots so no data is ever re-emitted after compaction
+- `TableStreamReader` — implements `array.RecordReader` across an unbounded stream; drives `TableStream` internally and blocks on context cancellation
+- `StartingFromLatest` — skips all existing data; emits only snapshots that arrive after the stream is started
+- `StartingFromEarliest` — replays all existing `APPEND` snapshots from the beginning, then continues polling
+
 ### Predicate / filter
 
 - `PredicateBuilder` — builds typed predicates: `Equal`, `NotEqual`, `LessThan`, `LessOrEqual`, `GreaterThan`, `GreaterOrEqual`, `IsNull`, `IsNotNull`, `In`
@@ -76,7 +84,7 @@ Early development — read-only, append-only tables, Parquet data files only.
 
 - **REST catalog** — only the filesystem catalog is implemented
 - **Tag-based and timestamp-based time travel** — only the latest snapshot is resolved
-- **Streaming / incremental scans** — no `StreamReadBuilder`, no watermark tracking
+- **Streaming / incremental scans** — `StreamReadBuilder`, `TableStream`, and `TableStreamReader` poll for new snapshots and emit only newly added data. Only `APPEND` commits produce splits; `COMPACT` / `OVERWRITE` / `ANALYZE` snapshots are silently skipped so compacted (rewritten) files are never re-emitted. `StartingFromLatest` skips existing data; `StartingFromEarliest` replays from the first snapshot.
 - **Schema evolution (type changes)** — columns added after table creation are null-filled correctly, but type changes are not handled
 - **Index files** — BTree / full-text / vector global indexes are not read
 
@@ -166,7 +174,7 @@ paimon-go/
 ├── schema/                 # TableSchema JSON + Arrow type mapping
 ├── manifest/               # Manifest-list + manifest-entry Avro readers
 ├── table/                  # FileStoreTable + PathFactory
-├── read/                   # ReadBuilder, TableScan, TableRead, Parquet reader
+├── read/                   # ReadBuilder, TableScan, TableRead, StreamReadBuilder, TableStream
 ├── predicate/              # Predicate, PredicateBuilder, stats pruning
 └── internal/
     ├── binaryrow/          # Paimon BinaryRow binary format decoder

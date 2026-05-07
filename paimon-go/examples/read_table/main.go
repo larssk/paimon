@@ -28,9 +28,7 @@ func main() {
 	limit     := flag.Int64("limit", 0, "Stop after this many rows (0 = no limit)")
 	credsFile := flag.String("gcs-creds", "", "Path to GCS service-account JSON key file (GCS only)")
 
-	filterCol := flag.String("filter-col", "", "Column name to filter on")
-	filterOp  := flag.String("filter-op", "eq", "Filter operator: eq, ne, lt, le, gt, ge, in")
-	filterVal := flag.String("filter-val", "", "Filter value; comma-separated list for 'in'")
+	filterShort := flag.String("filter", "", "Equality filters: field:value,field:value  (AND'd together)")
 
 	stream       := flag.Bool("stream", false, "Enable continuous stream mode (polls for new snapshots)")
 	pollInterval := flag.Duration("poll", 2*time.Second, "Poll interval in stream mode (e.g. 5s, 500ms)")
@@ -40,9 +38,6 @@ func main() {
 	if *warehouse == "" || *tblName == "" {
 		flag.Usage()
 		log.Fatal("--warehouse and --table are required")
-	}
-	if (*filterCol == "") != (*filterVal == "") {
-		log.Fatal("--filter-col and --filter-val must be used together")
 	}
 
 	ctx := context.Background()
@@ -69,15 +64,29 @@ func main() {
 		rb = rb.WithLimit(*limit)
 	}
 
-	var filter *predicate.Predicate
-	if *filterCol != "" {
-		p, err := buildFilter(tbl, *filterCol, *filterOp, *filterVal)
+	// --filter field:value,field:value  (equality, multiple columns)
+	var preds []*predicate.Predicate
+	if *filterShort != "" {
+		ps, err := buildEqualityFilters(tbl, *filterShort)
 		if err != nil {
-			log.Fatalf("build filter: %v", err)
+			log.Fatalf("--filter: %v", err)
 		}
-		filter = p
-		rb = rb.WithFilter(p)
-		fmt.Printf("filter:    %s %s %s\n", *filterCol, *filterOp, *filterVal)
+		preds = append(preds, ps...)
+		fmt.Printf("filter:    %s\n", *filterShort)
+	}
+
+	var filter *predicate.Predicate
+	switch len(preds) {
+	case 0:
+		// no filter
+	case 1:
+		filter = preds[0]
+	default:
+		filter = predicate.And(preds...)
+	}
+
+	if filter != nil {
+		rb = rb.WithFilter(filter)
 	}
 
 	if *stream {
@@ -169,56 +178,48 @@ func runStream(ctx context.Context, tbl *table.FileStoreTable, filter *predicate
 	fmt.Printf("\n%d row(s) received\n", totalRows)
 }
 
-// buildFilter constructs a Predicate from the --filter-* flags.
-func buildFilter(tbl *table.FileStoreTable, col, op, val string) (*predicate.Predicate, error) {
-	f, ok := tbl.Schema.FieldByName(col)
-	if !ok {
-		return nil, fmt.Errorf("column %q not found in schema", col)
-	}
-
+// buildEqualityFilters parses --filter "field:value,field:value" and returns
+// one equality Predicate per pair. Values are type-coerced to match the column
+// type. Each pair is split on the first colon so values containing colons
+// (e.g. timestamps) are handled correctly.
+func buildEqualityFilters(tbl *table.FileStoreTable, raw string) ([]*predicate.Predicate, error) {
 	pb := predicate.NewBuilder(tbl.Schema.Fields)
-	baseType := strings.ToUpper(strings.SplitN(f.Type.Type, "(", 2)[0])
-	baseType = strings.TrimSuffix(baseType, " NOT NULL")
-
-	if op == "in" {
-		parts := strings.Split(val, ",")
-		vals := make([]interface{}, 0, len(parts))
-		for _, raw := range parts {
-			v, err := parseFilterValue(baseType, strings.TrimSpace(raw))
-			if err != nil {
-				return nil, err
-			}
-			vals = append(vals, v)
+	var preds []*predicate.Predicate
+	for _, pair := range strings.Split(raw, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
 		}
-		return pb.In(col, vals...)
-	}
+		idx := strings.IndexByte(pair, ':')
+		if idx < 0 {
+			return nil, fmt.Errorf("pair %q has no ':' separator; expected field:value", pair)
+		}
+		col := strings.TrimSpace(pair[:idx])
+		val := strings.TrimSpace(pair[idx+1:])
 
-	typed, err := parseFilterValue(baseType, val)
-	if err != nil {
-		return nil, err
-	}
+		f, ok := tbl.Schema.FieldByName(col)
+		if !ok {
+			return nil, fmt.Errorf("column %q not found in schema", col)
+		}
+		baseType := strings.ToUpper(strings.SplitN(f.Type.Type, "(", 2)[0])
+		baseType = strings.TrimSuffix(baseType, " NOT NULL")
 
-	switch op {
-	case "eq":
-		return pb.Equal(col, typed)
-	case "ne":
-		return pb.NotEqual(col, typed)
-	case "lt":
-		return pb.LessThan(col, typed)
-	case "le":
-		return pb.LessOrEqual(col, typed)
-	case "gt":
-		return pb.GreaterThan(col, typed)
-	case "ge":
-		return pb.GreaterOrEqual(col, typed)
-	default:
-		return nil, fmt.Errorf("unknown operator %q; valid: eq, ne, lt, le, gt, ge, in", op)
+		typed, err := parseValue(baseType, val)
+		if err != nil {
+			return nil, fmt.Errorf("pair %q: %w", pair, err)
+		}
+		p, err := pb.Equal(col, typed)
+		if err != nil {
+			return nil, fmt.Errorf("pair %q: %w", pair, err)
+		}
+		preds = append(preds, p)
 	}
+	return preds, nil
 }
 
-// parseFilterValue coerces a CLI string to the Go type that the predicate stats
-// engine uses for the given Paimon base type.
-func parseFilterValue(paimonType, raw string) (interface{}, error) {
+// parseValue coerces a CLI string to the Go type that the predicate stats
+// engine expects for the given Paimon base type.
+func parseValue(paimonType, raw string) (interface{}, error) {
 	switch paimonType {
 	case "TINYINT":
 		v, err := strconv.ParseInt(raw, 10, 8)
@@ -239,19 +240,15 @@ func parseFilterValue(paimonType, raw string) (interface{}, error) {
 		v, err := strconv.ParseFloat(raw, 64)
 		return v, err
 	case "BOOLEAN":
-		v, err := strconv.ParseBool(raw)
-		return v, err
+		return strconv.ParseBool(raw)
 	case "DATE":
-		// Accept YYYY-MM-DD; convert to days since Unix epoch (int32).
 		t, err := time.Parse("2006-01-02", raw)
 		if err != nil {
 			return nil, fmt.Errorf("DATE value %q must be YYYY-MM-DD: %w", raw, err)
 		}
 		epoch := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
-		days := int32(t.UTC().Sub(epoch).Hours() / 24)
-		return days, nil
+		return int32(t.UTC().Sub(epoch).Hours() / 24), nil
 	case "TIMESTAMP", "TIMESTAMP_LTZ":
-		// Accept RFC3339 / ISO-8601 with or without timezone.
 		for _, layout := range []string{
 			time.RFC3339Nano,
 			time.RFC3339,

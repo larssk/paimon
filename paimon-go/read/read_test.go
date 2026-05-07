@@ -338,3 +338,77 @@ func TestToArrow_FilterApplied(t *testing.T) {
 		t.Errorf("want val=20, got %d", valChunk.Value(0))
 	}
 }
+
+// TestToArrow_TimestampUnitCast verifies that a Parquet file written with
+// timestamp[ms] is transparently cast to timestamp[us] when the table schema
+// declares the column as TIMESTAMP(6) (which maps to timestamp[us]).
+// This covers the panic observed in production when the file unit differs from
+// the schema unit.
+func TestToArrow_TimestampUnitCast(t *testing.T) {
+	alloc := memory.NewGoAllocator()
+
+	// Build a Parquet file with a timestamp[ms] column.
+	msType := arrow.FixedWidthTypes.Timestamp_ms
+	fileSchema := arrow.NewSchema([]arrow.Field{
+		{Name: "id", Type: arrow.PrimitiveTypes.Int32, Nullable: true},
+		{Name: "ts", Type: msType, Nullable: true},
+	}, nil)
+
+	idBldr := array.NewInt32Builder(alloc)
+	defer idBldr.Release()
+	idBldr.AppendValues([]int32{1, 2, 3}, nil)
+	idArr := idBldr.NewArray()
+	defer idArr.Release()
+
+	tsBldr := array.NewTimestampBuilder(alloc, msType.(*arrow.TimestampType))
+	defer tsBldr.Release()
+	// Three timestamps in milliseconds: 1000ms, 2000ms, 3000ms
+	tsBldr.AppendValues([]arrow.Timestamp{1000, 2000, 3000}, nil)
+	tsArr := tsBldr.NewArray()
+	defer tsArr.Release()
+
+	fileTbl := array.NewTableFromSlice(fileSchema, [][]arrow.Array{{idArr}, {tsArr}})
+	defer fileTbl.Release()
+	parquetBytes := writeParquet(t, fileTbl)
+
+	mio := newMockFileIO()
+	mio.register("data/ts.parquet", parquetBytes)
+
+	// Table schema declares ts as TIMESTAMP(6) → timestamp[us].
+	sch := &schema.TableSchema{
+		Fields: []schema.DataField{
+			{ID: 0, Name: "id", Type: schema.DataType{Type: "INT", Nullable: true}},
+			{ID: 1, Name: "ts", Type: schema.DataType{Type: "TIMESTAMP", Precision: 6, Nullable: true}},
+		},
+	}
+	tbl := &readTable{sch: sch, io: mio}
+	rb := newReadBuilderFromIface(tbl, nil)
+
+	result, err := rb.NewRead().ToArrow(context.Background(), []DataSplit{makeFileSplit("ts.parquet")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	defer result.Release()
+
+	if result.NumRows() != 3 {
+		t.Errorf("want 3 rows, got %d", result.NumRows())
+	}
+
+	// The ts column should now be timestamp[us].
+	tsCol := result.Column(1)
+	chunk := tsCol.Data().Chunks()[0]
+	tsTyped, ok := chunk.(*array.Timestamp)
+	if !ok {
+		t.Fatalf("ts column: want *array.Timestamp, got %T", chunk)
+	}
+	if tsTyped.DataType().(*arrow.TimestampType).Unit != arrow.Microsecond {
+		t.Errorf("want timestamp unit=us, got %v", tsTyped.DataType())
+	}
+	// 1000ms = 1_000_000us, 2000ms = 2_000_000us, 3000ms = 3_000_000us
+	wantUs := []arrow.Timestamp{1_000_000, 2_000_000, 3_000_000}
+	for i, want := range wantUs {
+		if got := tsTyped.Value(i); got != want {
+			t.Errorf("row %d: want ts=%d us, got %d", i, want, got)
+		}
+	}
+}

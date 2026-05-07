@@ -8,6 +8,7 @@ import (
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow/compute"
 	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/apache/arrow-go/v18/parquet/file"
 	"github.com/apache/arrow-go/v18/parquet/pqarrow"
@@ -122,7 +123,7 @@ func (r *splitRecordReader) Next() bool {
 			if r.rowRdr.Next() {
 				rec := r.rowRdr.RecordBatch()
 				// Project to read schema (handles missing columns as nulls).
-				projected, err := r.projectRecord(rec)
+				projected, err := r.projectRecord(r.ctx, rec)
 				if err != nil {
 					r.currentErr = err
 					return false
@@ -248,7 +249,7 @@ func (r *splitRecordReader) parquetColumnIndices(pqReader *file.Reader) []int {
 // When a column's physical type is compatible but not identical (e.g. timestamp with
 // vs without timezone), the column data is reused and the schema field is overridden
 // to match what the file actually contains, avoiding Arrow type-mismatch panics.
-func (r *splitRecordReader) projectRecord(rec arrow.RecordBatch) (arrow.RecordBatch, error) {
+func (r *splitRecordReader) projectRecord(ctx context.Context, rec arrow.RecordBatch) (arrow.RecordBatch, error) {
 	if rec.Schema().Equal(r.arrowSchema) {
 		rec.Retain()
 		return rec, nil
@@ -274,8 +275,23 @@ func (r *splitRecordReader) projectRecord(rec arrow.RecordBatch) (arrow.RecordBa
 			// Use the file's actual field type to avoid type-mismatch panics.
 			fileField := fileSchema.Field(colIdx[0])
 			if arrowTypesCompatible(fileField.Type, wantField.Type) {
+				// Same physical representation — use file type, keep our name.
 				effectiveFields[i] = fileField
-				effectiveFields[i].Name = f.Name // keep our name
+				effectiveFields[i].Name = f.Name
+			} else if fileField.Type.ID() == wantField.Type.ID() {
+				// Same logical type family but different parameters
+				// (e.g., timestamp[ms] vs timestamp[us]).
+				// Cast the column to the target type.
+				casted, castErr := compute.CastToType(ctx, col, wantField.Type)
+				if castErr == nil {
+					col.Release()
+					cols[i] = casted
+					effectiveFields[i] = wantField
+				} else {
+					// Cast failed — use file type as-is (best effort, may fail later).
+					effectiveFields[i] = fileField
+					effectiveFields[i].Name = f.Name
+				}
 			} else {
 				effectiveFields[i] = wantField
 			}
