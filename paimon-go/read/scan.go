@@ -29,14 +29,22 @@ type Plan struct {
 
 // ReadBuilder is the entry point for building a table scan + read pipeline.
 type ReadBuilder struct {
-	tbl            Table
-	manifestReader ManifestReader
+	tbl            tableReader
+	manifestReader manifestReader
 	filter         *predicate.Predicate
 	projection     []string // nil = all columns
 	limit          int64    // 0 = no limit
 }
 
 // NewReadBuilder creates a ReadBuilder for the given table.
+//
+// By default all columns are returned (no projection) and no filter is applied.
+// Call [ReadBuilder.WithProjection], [ReadBuilder.WithFilter], and
+// [ReadBuilder.WithLimit] to refine the read before calling [ReadBuilder.NewScan]
+// and [ReadBuilder.NewRead].
+//
+// A ReadBuilder is not safe for concurrent use. Create one per goroutine or
+// protect it with a mutex.
 func NewReadBuilder(tbl *table.FileStoreTable) *ReadBuilder {
 	return &ReadBuilder{
 		tbl:            tbl,
@@ -44,19 +52,24 @@ func NewReadBuilder(tbl *table.FileStoreTable) *ReadBuilder {
 	}
 }
 
-// newReadBuilderFromIface creates a ReadBuilder using the Table interface directly.
+// newReadBuilderFromIface creates a ReadBuilder using the tableReader interface directly.
 // Used internally and in tests.
-func newReadBuilderFromIface(tbl Table, mr ManifestReader) *ReadBuilder {
+func newReadBuilderFromIface(tbl tableReader, mr manifestReader) *ReadBuilder {
 	return &ReadBuilder{tbl: tbl, manifestReader: mr}
 }
 
-// WithFilter attaches a filter predicate.
+// WithFilter attaches a filter predicate applied during both stats-based file
+// pruning (planning) and row-level evaluation (reading). Passing nil clears any
+// previously set filter. Use [ReadBuilder.NewPredicateBuilder] to construct
+// predicates scoped to the effective read schema.
 func (rb *ReadBuilder) WithFilter(p *predicate.Predicate) *ReadBuilder {
 	rb.filter = p
 	return rb
 }
 
-// WithProjection limits the columns returned. Pass column names.
+// WithProjection limits the columns returned to the named subset.
+// Column names must match those in the table schema exactly; unknown names are
+// silently ignored. Passing nil or an empty slice returns all columns.
 func (rb *ReadBuilder) WithProjection(cols []string) *ReadBuilder {
 	rb.projection = cols
 	return rb

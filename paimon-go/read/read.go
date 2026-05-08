@@ -134,7 +134,13 @@ func (m *multiSplitReader) openSplit(split DataSplit) (array.RecordReader, error
 	}, nil
 }
 
-// ToArrow reads all splits and returns a single arrow.Table.
+// ToArrow reads all splits and materialises the result as a single arrow.Table
+// held entirely in memory.
+//
+// For large tables or streaming workloads prefer [TableRead.ToArrowReader],
+// which streams record batches one at a time without accumulating all data.
+//
+// The caller must call Release() on the returned table when done to free memory.
 func (tr *TableRead) ToArrow(ctx context.Context, splits []DataSplit) (arrow.Table, error) {
 	rr, err := tr.ToArrowReader(ctx, splits)
 	if err != nil {

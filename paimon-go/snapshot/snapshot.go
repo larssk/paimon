@@ -13,14 +13,30 @@ import (
 	"github.com/apache/paimon/paimon-go/internal/pathutil"
 )
 
-// CommitKind matches Paimon's CommitKind enum.
+// CommitKind matches Paimon's CommitKind enum and describes what kind of
+// write produced a snapshot. Stream readers use this to decide which snapshots
+// contain new logical rows.
 type CommitKind string
 
 const (
-	CommitAppend    CommitKind = "APPEND"
+	// CommitAppend is produced by INSERT / streaming append writes.
+	// These snapshots contain new ADD entries in the delta manifest and are
+	// the only kind emitted by [read.TableStream.Next].
+	CommitAppend CommitKind = "APPEND"
+
+	// CommitOverwrite is produced by INSERT OVERWRITE writes that replace
+	// an entire partition. The delta manifest contains DELETE entries for
+	// the old files and ADD entries for the new ones.
 	CommitOverwrite CommitKind = "OVERWRITE"
-	CommitCompact   CommitKind = "COMPACT"
-	CommitAnalyze   CommitKind = "ANALYZE"
+
+	// CommitCompact is produced by the background compaction job. It
+	// reorganises physical files for read performance but does not add new
+	// logical rows. Stream readers skip these snapshots.
+	CommitCompact CommitKind = "COMPACT"
+
+	// CommitAnalyze is produced when table statistics are collected.
+	// It does not change any data files.
+	CommitAnalyze CommitKind = "ANALYZE"
 )
 
 // Snapshot represents a Paimon snapshot (stored as JSON at snapshot/<id>).

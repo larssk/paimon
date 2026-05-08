@@ -10,9 +10,11 @@ import (
 	"github.com/apache/paimon/paimon-go/snapshot"
 )
 
-// Table is the interface that ReadBuilder and TableScan depend on.
+// tableReader is the internal interface that ReadBuilder and TableScan depend on.
 // *table.FileStoreTable satisfies this interface.
-type Table interface {
+// It is unexported because callers never need to implement it — they always pass
+// a *table.FileStoreTable to NewReadBuilder or NewStreamReadBuilder.
+type tableReader interface {
 	LatestSnapshot(ctx context.Context) (*snapshot.Snapshot, error)
 	SnapshotByID(ctx context.Context, id int64) (*snapshot.Snapshot, error)
 	ListSnapshotIDs(ctx context.Context) ([]int64, error)
@@ -22,9 +24,10 @@ type Table interface {
 	DataFilePath(partition *binaryrow.BinaryRow, partFields []schema.DataField, bucket int, fileName string) string
 }
 
-// ManifestReader reads manifest-list and manifest-entry Avro files.
-// The real implementation wraps the free functions in the manifest package.
-type ManifestReader interface {
+// manifestReader reads manifest-list and manifest-entry Avro files.
+// It is unexported because the real implementation is wired inside NewReadBuilder
+// and callers never need to provide their own.
+type manifestReader interface {
 	ReadList(ctx context.Context, filename string, partFields []schema.DataField) ([]manifest.ManifestFileMeta, error)
 	ReadAllEntries(ctx context.Context, metas []manifest.ManifestFileMeta, partFields []schema.DataField, valueFields []schema.DataField) ([]manifest.ManifestEntry, error)
 }
@@ -35,7 +38,7 @@ type defaultManifestReader struct {
 	io  fileio.FileIO
 }
 
-func newDefaultManifestReader(dir string, io fileio.FileIO) ManifestReader {
+func newDefaultManifestReader(dir string, io fileio.FileIO) manifestReader {
 	return &defaultManifestReader{dir: dir, io: io}
 }
 

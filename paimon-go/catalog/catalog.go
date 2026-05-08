@@ -41,6 +41,13 @@ type Options struct {
 }
 
 // New creates a Catalog from the provided options.
+//
+// opts.Metastore selects the catalog implementation. The only supported value
+// is "filesystem" (case-insensitive); it is also the default when the field is
+// empty. Any other value returns an error.
+//
+// opts.Warehouse must be set. For GCS use a "gs://bucket/path" URI; for local
+// storage use an absolute path.
 func New(ctx context.Context, opts Options) (Catalog, error) {
 	ms := strings.ToLower(opts.Metastore)
 	if ms == "" {

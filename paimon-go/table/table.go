@@ -82,17 +82,38 @@ func sanitizePartitionValue(v string) string {
 }
 
 // FileStoreTable is the central handle for a Paimon table.
+//
+// Obtain one via [catalog.Catalog.GetTable] or [NewFileStoreTable].
+//
+// The three exported fields give direct access to the table's metadata:
+//   - Schema — the latest TableSchema, loaded eagerly at construction time.
+//   - Paths  — constructs well-formed paths within the table directory.
+//   - IO     — the FileIO implementation used to read from storage.
+//
+// FileStoreTable is not safe for concurrent mutation, but concurrent reads are
+// fine because all exported methods are read-only after construction.
 type FileStoreTable struct {
 	tableRoot string
-	Schema    *schema.TableSchema
-	Paths     *PathFactory
-	IO        fileio.FileIO
+	// Schema is the table's current schema, loaded at construction time.
+	// For schema evolution, use SchemaForID to load a historical schema.
+	Schema *schema.TableSchema
+	// Paths constructs paths within the table directory (schema/, snapshot/, manifest/, data/).
+	Paths *PathFactory
+	// IO is the underlying FileIO used to read objects from storage.
+	IO fileio.FileIO
 
 	snapshotMgr *snapshot.Manager
 	schemaMgr   *schema.Manager
 }
 
 // NewFileStoreTable opens a Paimon table at the given root path.
+//
+// ctx is used only during construction to fetch the latest schema file; it is
+// not retained afterwards. Pass a context with an appropriate deadline if the
+// storage backend is remote.
+//
+// Returns an error if the latest schema cannot be read (e.g. the path does not
+// exist or the caller lacks permissions).
 func NewFileStoreTable(ctx context.Context, tableRoot string, fio fileio.FileIO) (*FileStoreTable, error) {
 	paths := NewPathFactory(tableRoot)
 	schemaMgr := schema.NewManager(tableRoot, fio)
@@ -117,31 +138,34 @@ func (t *FileStoreTable) LatestSnapshot(ctx context.Context) (*snapshot.Snapshot
 	return t.snapshotMgr.Latest(ctx)
 }
 
-// SnapshotByID returns the snapshot for a specific ID (satisfies read.Table interface).
+// SnapshotByID returns the snapshot for a specific ID (satisfies read.tableReader interface).
 func (t *FileStoreTable) SnapshotByID(ctx context.Context, id int64) (*snapshot.Snapshot, error) {
 	return t.snapshotMgr.Read(ctx, id)
 }
 
-// ListSnapshotIDs returns all available snapshot IDs in ascending order (satisfies read.Table interface).
+// ListSnapshotIDs returns all available snapshot IDs in ascending order (satisfies read.tableReader interface).
 func (t *FileStoreTable) ListSnapshotIDs(ctx context.Context) ([]int64, error) {
 	return t.snapshotMgr.ListIDs(ctx)
 }
 
-// GetSchema returns the current table schema (satisfies read.Table interface).
+// GetSchema returns the current table schema (satisfies read.tableReader interface).
 func (t *FileStoreTable) GetSchema() *schema.TableSchema { return t.Schema }
 
-// ManifestDir returns the manifest directory path (satisfies read.Table interface).
+// ManifestDir returns the manifest directory path (satisfies read.tableReader interface).
 func (t *FileStoreTable) ManifestDir() string { return t.Paths.ManifestDir() }
 
-// GetIO returns the FileIO (satisfies read.Table interface).
+// GetIO returns the FileIO (satisfies read.tableReader interface).
 func (t *FileStoreTable) GetIO() fileio.FileIO { return t.IO }
 
-// DataFilePath builds an absolute data file path (satisfies read.Table interface).
+// DataFilePath builds an absolute data file path (satisfies read.tableReader interface).
 func (t *FileStoreTable) DataFilePath(partition *binaryrow.BinaryRow, partFields []schema.DataField, bucket int, fileName string) string {
 	return t.Paths.DataFilePath(partition, partFields, bucket, fileName)
 }
 
 // SchemaForID returns the table schema for a specific schema ID.
+// If id matches the current schema it is returned from the in-memory cache
+// without any I/O. Use this for schema-evolution scenarios where a data file
+// was written under a different schema than the current one.
 func (t *FileStoreTable) SchemaForID(ctx context.Context, id int64) (*schema.TableSchema, error) {
 	if id == t.Schema.ID {
 		return t.Schema, nil

@@ -20,25 +20,33 @@ import (
 type Op int
 
 const (
-	OpEqual          Op = iota
-	OpNotEqual
-	OpLessThan
-	OpLessOrEqual
-	OpGreaterThan
-	OpGreaterOrEqual
-	OpIsNull
-	OpIsNotNull
-	OpIn
-	OpAnd
-	OpOr
-	OpNot
+	OpEqual          Op = iota // field == value
+	OpNotEqual                 // field != value
+	OpLessThan                 // field < value
+	OpLessOrEqual              // field <= value
+	OpGreaterThan              // field > value
+	OpGreaterOrEqual           // field >= value
+	OpIsNull                   // field IS NULL
+	OpIsNotNull                // field IS NOT NULL
+	OpIn                       // field IN (values...)
+	OpAnd                      // logical AND of Children
+	OpOr                       // logical OR of Children
+	OpNot                      // logical NOT of Children[0]
 )
 
 // Predicate is a filter expression over a table's fields.
+//
+// A Predicate is either a leaf (Op is one of the comparison operators, FieldIdx
+// and Literals are set) or a compound node (Op is OpAnd / OpOr / OpNot,
+// Children are set). The tree is built by [Builder] methods and the [And],
+// [Or], [Not] combinators; callers do not normally construct Predicate values
+// directly.
+//
+// FieldIdx is the zero-based index of the field in the read/projected schema
+// and must be rebound with [WithProjection] whenever the column set changes.
 type Predicate struct {
-	Op       Op
-	// For leaf predicates: field index into the projected schema and the comparison value(s).
-	FieldIdx int
+	Op        Op
+	FieldIdx  int
 	FieldName string
 	// TypeTag as returned by schema.TypeTag (used for BinaryRow decoding).
 	TypeTag  string
@@ -47,29 +55,57 @@ type Predicate struct {
 	Children []*Predicate
 }
 
-// And combines predicates with AND.
+// And combines two or more predicates with logical AND.
+// Returns a predicate that is true only when all children are true.
+// Passing a single predicate is valid and returns an OpAnd wrapper around it.
 func And(preds ...*Predicate) *Predicate {
 	return &Predicate{Op: OpAnd, Children: preds}
 }
 
-// Or combines predicates with OR.
+// Or combines two or more predicates with logical OR.
+// Returns a predicate that is true when at least one child is true.
 func Or(preds ...*Predicate) *Predicate {
 	return &Predicate{Op: OpOr, Children: preds}
 }
 
 // Not negates a predicate.
+// Note: NOT is not applied during stats-based file pruning (conservative: the
+// file is always kept). It is applied at row-level evaluation by [EvalRow].
 func Not(p *Predicate) *Predicate {
 	return &Predicate{Op: OpNot, Children: []*Predicate{p}}
 }
 
 // Builder constructs leaf predicates against a given schema.
+//
+// Obtain a Builder from [read.ReadBuilder.NewPredicateBuilder] (preferred) or
+// directly via [NewBuilder]. The Builder is bound to a specific set of fields;
+// if the field set changes (e.g. after projection) call [WithProjection] to
+// rebind FieldIdx values.
+//
+// The value argument to comparison methods must match the Go type that
+// corresponds to the Paimon field type:
+//
+//	Paimon type          Go value type
+//	INT / INTEGER        int32
+//	BIGINT               int64
+//	FLOAT                float32
+//	DOUBLE               float64
+//	BOOLEAN              bool
+//	STRING / VARCHAR     string
+//	DATE                 int32  (days since 1970-01-01)
+//	TIMESTAMP            int64  (epoch milliseconds)
+//
+// Passing the wrong type does not panic at construction time but will produce
+// incorrect results during stats-based pruning and row-level evaluation.
 type Builder struct {
 	fields []schema.DataField
 	// index map: field name → position in fields slice
 	index  map[string]int
 }
 
-// NewBuilder creates a PredicateBuilder for the given fields.
+// NewBuilder creates a Builder bound to the given field slice.
+// Prefer [read.ReadBuilder.NewPredicateBuilder] which binds automatically to
+// the effective (possibly projected) read schema.
 func NewBuilder(fields []schema.DataField) *Builder {
 	idx := make(map[string]int, len(fields))
 	for i, f := range fields {
@@ -100,47 +136,56 @@ func (b *Builder) leaf(op Op, name string, literals ...interface{}) (*Predicate,
 	}, nil
 }
 
-// Equal builds an equality predicate.
+// Equal builds a predicate that matches rows where name == value.
+// Returns an error if name is not present in the builder's field set.
 func (b *Builder) Equal(name string, value interface{}) (*Predicate, error) {
 	return b.leaf(OpEqual, name, value)
 }
 
-// NotEqual builds a not-equal predicate.
+// NotEqual builds a predicate that matches rows where name != value.
+// Returns an error if name is not present in the builder's field set.
 func (b *Builder) NotEqual(name string, value interface{}) (*Predicate, error) {
 	return b.leaf(OpNotEqual, name, value)
 }
 
-// LessThan builds a < predicate.
+// LessThan builds a predicate that matches rows where name < value.
+// Returns an error if name is not present in the builder's field set.
 func (b *Builder) LessThan(name string, value interface{}) (*Predicate, error) {
 	return b.leaf(OpLessThan, name, value)
 }
 
-// LessOrEqual builds a <= predicate.
+// LessOrEqual builds a predicate that matches rows where name <= value.
+// Returns an error if name is not present in the builder's field set.
 func (b *Builder) LessOrEqual(name string, value interface{}) (*Predicate, error) {
 	return b.leaf(OpLessOrEqual, name, value)
 }
 
-// GreaterThan builds a > predicate.
+// GreaterThan builds a predicate that matches rows where name > value.
+// Returns an error if name is not present in the builder's field set.
 func (b *Builder) GreaterThan(name string, value interface{}) (*Predicate, error) {
 	return b.leaf(OpGreaterThan, name, value)
 }
 
-// GreaterOrEqual builds a >= predicate.
+// GreaterOrEqual builds a predicate that matches rows where name >= value.
+// Returns an error if name is not present in the builder's field set.
 func (b *Builder) GreaterOrEqual(name string, value interface{}) (*Predicate, error) {
 	return b.leaf(OpGreaterOrEqual, name, value)
 }
 
-// IsNull builds an IS NULL predicate.
+// IsNull builds a predicate that matches rows where name IS NULL.
+// Returns an error if name is not present in the builder's field set.
 func (b *Builder) IsNull(name string) (*Predicate, error) {
 	return b.leaf(OpIsNull, name)
 }
 
-// IsNotNull builds an IS NOT NULL predicate.
+// IsNotNull builds a predicate that matches rows where name IS NOT NULL.
+// Returns an error if name is not present in the builder's field set.
 func (b *Builder) IsNotNull(name string) (*Predicate, error) {
 	return b.leaf(OpIsNotNull, name)
 }
 
-// In builds an IN predicate.
+// In builds a predicate that matches rows where name is equal to any of values.
+// Returns an error if name is not present in the builder's field set.
 func (b *Builder) In(name string, values ...interface{}) (*Predicate, error) {
 	return b.leaf(OpIn, name, values...)
 }

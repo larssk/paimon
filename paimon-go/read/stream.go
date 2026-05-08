@@ -31,8 +31,8 @@ const defaultPollInterval = 2 * time.Second
 
 // StreamReadBuilder is the entry point for building a continuous stream read.
 type StreamReadBuilder struct {
-	tbl            Table
-	manifestReader ManifestReader
+	tbl            tableReader
+	manifestReader manifestReader
 	filter         *predicate.Predicate
 	projection     []string
 	startingFrom   StartingFrom
@@ -40,6 +40,11 @@ type StreamReadBuilder struct {
 }
 
 // NewStreamReadBuilder creates a StreamReadBuilder for the given table.
+//
+// By default reads start from the latest snapshot ([StartingFromLatest]) with
+// no filter and no projection. Use [StreamReadBuilder.WithStartingFrom],
+// [StreamReadBuilder.WithFilter], and [StreamReadBuilder.WithProjection] to
+// configure before calling [StreamReadBuilder.NewStream].
 func NewStreamReadBuilder(tbl *table.FileStoreTable) *StreamReadBuilder {
 	return &StreamReadBuilder{
 		tbl:            tbl,
@@ -48,9 +53,9 @@ func NewStreamReadBuilder(tbl *table.FileStoreTable) *StreamReadBuilder {
 	}
 }
 
-// newStreamReadBuilderFromIface creates a StreamReadBuilder using the Table
+// newStreamReadBuilderFromIface creates a StreamReadBuilder using the tableReader
 // interface directly. Used in tests.
-func newStreamReadBuilderFromIface(tbl Table, mr ManifestReader) *StreamReadBuilder {
+func newStreamReadBuilderFromIface(tbl tableReader, mr manifestReader) *StreamReadBuilder {
 	return &StreamReadBuilder{
 		tbl:            tbl,
 		manifestReader: mr,
@@ -58,13 +63,16 @@ func newStreamReadBuilderFromIface(tbl Table, mr ManifestReader) *StreamReadBuil
 	}
 }
 
-// WithFilter attaches a filter predicate applied at the row level.
+// WithFilter attaches a filter predicate applied at the row level to each
+// snapshot batch. Stats-based pruning is also applied during planning.
+// Passing nil clears any previously set filter.
 func (sb *StreamReadBuilder) WithFilter(p *predicate.Predicate) *StreamReadBuilder {
 	sb.filter = p
 	return sb
 }
 
-// WithProjection limits the columns returned.
+// WithProjection limits the columns returned to the named subset.
+// Unknown names are silently ignored. Passing nil or empty returns all columns.
 func (sb *StreamReadBuilder) WithProjection(cols []string) *StreamReadBuilder {
 	sb.projection = cols
 	return sb
@@ -82,7 +90,8 @@ func (sb *StreamReadBuilder) WithPollInterval(d time.Duration) *StreamReadBuilde
 	return sb
 }
 
-// NewStream returns a TableStream ready to be iterated.
+// NewStream returns a TableStream that iterates over new snapshots.
+// Each call to [TableStream.Next] blocks until a new APPEND snapshot arrives.
 func (sb *StreamReadBuilder) NewStream() *TableStream {
 	return &TableStream{sb: sb, lastID: -1}
 }
@@ -311,6 +320,10 @@ type TableStreamReader struct {
 }
 
 // NewStreamReader creates a TableStreamReader from a StreamReadBuilder.
+// The returned reader implements [array.RecordReader] and can be used
+// wherever a standard Arrow record reader is expected. It blocks inside
+// [TableStreamReader.Next] until a new snapshot batch arrives or ctx is
+// cancelled.
 func NewStreamReader(ctx context.Context, sb *StreamReadBuilder) *TableStreamReader {
 	return &TableStreamReader{
 		ctx:    ctx,
@@ -319,6 +332,7 @@ func NewStreamReader(ctx context.Context, sb *StreamReadBuilder) *TableStreamRea
 	}
 }
 
+// Schema returns the Arrow schema of the record batches produced by this reader.
 func (r *TableStreamReader) Schema() *arrow.Schema {
 	fields := r.read.readFields()
 	s, err := schema.ToArrowSchema(fields)
@@ -328,7 +342,11 @@ func (r *TableStreamReader) Schema() *arrow.Schema {
 	return s
 }
 
+// Retain is a no-op; TableStreamReader does not use reference counting.
 func (r *TableStreamReader) Retain()  {}
+
+// Release releases the current record batch and any open inner reader.
+// Safe to call multiple times. Call when you are done with the reader.
 func (r *TableStreamReader) Release() {
 	if r.current != nil {
 		r.current.Release()
@@ -340,13 +358,23 @@ func (r *TableStreamReader) Release() {
 	}
 }
 
+// RecordBatch returns the current record batch. Valid only after Next returns true.
 func (r *TableStreamReader) RecordBatch() arrow.RecordBatch { return r.current }
-func (r *TableStreamReader) Record() arrow.RecordBatch      { return r.current }
-func (r *TableStreamReader) Err() error                     { return r.currentErr }
+
+// Record is an alias for RecordBatch, present for interface compatibility.
+func (r *TableStreamReader) Record() arrow.RecordBatch { return r.current }
+
+// Err returns the first error encountered, or nil if the reader stopped because
+// the context was cancelled. Always check Err after Next returns false.
+func (r *TableStreamReader) Err() error { return r.currentErr }
 
 // SnapshotID returns the snapshot ID of the current record batch.
+// Returns -1 before the first successful Next call.
 func (r *TableStreamReader) SnapshotID() int64 { return r.curSnapID }
 
+// Next advances to the next record batch, blocking until new data arrives.
+// Returns false when the context is cancelled or an error occurs; check
+// [TableStreamReader.Err] to distinguish the two cases.
 func (r *TableStreamReader) Next() bool {
 	if r.current != nil {
 		r.current.Release()

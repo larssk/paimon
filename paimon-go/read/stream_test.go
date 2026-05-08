@@ -44,7 +44,7 @@ func (s *streamTable) SnapshotByID(_ context.Context, id int64) (*snapshot.Snaps
 	return nil, errors.New("snapshot not found")
 }
 
-// streamManifestReader is a ManifestReader where ReadList returns different
+// streamManifestReader is a manifestReader where ReadList returns different
 // slices per call, keyed by the filename (= DeltaManifestList of the snapshot).
 // ReadAllEntries returns entries for all metas passed in, looked up by FileName.
 type streamManifestReader struct {

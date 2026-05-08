@@ -19,7 +19,7 @@ import (
 // Test doubles
 // ---------------------------------------------------------------------------
 
-// stubTable satisfies the Table interface. All behaviour can be controlled via fields.
+// stubTable satisfies the tableReader interface. All behaviour can be controlled via fields.
 type stubTable struct {
 	snap    *snapshot.Snapshot
 	snapErr error
@@ -54,7 +54,7 @@ func (s *stubTable) DataFilePath(_ *binaryrow.BinaryRow, _ []schema.DataField, _
 	return "data/" + fileName
 }
 
-// stubManifestReader satisfies the ManifestReader interface.
+// stubManifestReader satisfies the manifestReader interface.
 // listResults is returned on ReadList calls; can be configured to fail per-call via listErrs.
 type stubManifestReader struct {
 	// listResults: successive calls to ReadList return these slices in order.

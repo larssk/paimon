@@ -39,26 +39,48 @@ type ManifestFileMeta struct {
 type EntryKind int
 
 const (
-	EntryAdd    EntryKind = 0
+	// EntryAdd indicates the file was added in this snapshot.
+	EntryAdd EntryKind = 0
+	// EntryDelete indicates the file was logically deleted (superseded by a newer
+	// compacted file or an OVERWRITE write). Files with EntryDelete are excluded
+	// from the read plan after ADD/DELETE resolution.
 	EntryDelete EntryKind = 1
 )
 
 // DataFileMeta holds the metadata of a single data file from a manifest entry.
 type DataFileMeta struct {
-	FileName             string
-	FileSize             int64
-	RowCount             int64
-	SchemaID             int64
-	Level                int
-	MinSequenceNumber    int64
-	MaxSequenceNumber    int64
-	KeyStats             SimpleStats
-	ValueStats           SimpleStats
-	ExtraFiles           []string
-	DeleteRowCount       *int64
-	ExternalPath         *string
-	FirstRowID           *int64
-	ValueStatsCols       []string // nil = all columns tracked
+	// FileName is the bare filename (no directory). Use table.PathFactory.DataFilePath
+	// to reconstruct the full storage path.
+	FileName string
+	FileSize int64
+	RowCount int64
+	// SchemaID is the schema under which this file was written. Use
+	// table.FileStoreTable.SchemaForID to resolve it for schema-evolution reads.
+	SchemaID int64
+	// Level is the LSM tree level: 0 = L0 (overlapping key ranges across files),
+	// 1+ = higher levels (non-overlapping within a level after compaction).
+	Level int
+	// MinSequenceNumber / MaxSequenceNumber bound the write-order sequence numbers
+	// of rows in this file. Used by the PK merge pipeline to pick the latest row.
+	MinSequenceNumber int64
+	MaxSequenceNumber int64
+	// KeyStats holds min/max/null statistics for the primary key columns.
+	KeyStats SimpleStats
+	// ValueStats holds min/max/null statistics for all value columns.
+	ValueStats SimpleStats
+	// ExtraFiles lists auxiliary files associated with this data file, such as
+	// deletion vector files (.dv). May be empty.
+	ExtraFiles []string
+	// DeleteRowCount is the number of rows logically deleted by deletion vectors,
+	// if present. Nil when deletion vectors are not used.
+	DeleteRowCount *int64
+	// ExternalPath is set when the data file lives outside the table's own
+	// directory (e.g. for externally managed files). Nil for normal files.
+	ExternalPath *string
+	FirstRowID   *int64
+	// ValueStatsCols lists the column names for which ValueStats are tracked.
+	// Nil means all columns are tracked.
+	ValueStatsCols []string
 }
 
 // ManifestEntry is a single record from a manifest file.

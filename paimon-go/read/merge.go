@@ -185,7 +185,7 @@ func partitionSection(files []manifest.DataFileMeta, keyFields []schema.DataFiel
 // and emits deduplicated value rows (RowKind INSERT or UPDATE_AFTER only).
 type sortMergeReader struct {
 	ctx         context.Context
-	tbl         Table
+	tbl         tableReader
 	split       DataSplit
 	keyFields   []schema.DataField
 	readFields  []schema.DataField // output fields (no PK metadata columns)
@@ -216,7 +216,7 @@ type mergedRow struct {
 
 func newSortMergeReader(
 	ctx context.Context,
-	tbl Table,
+	tbl tableReader,
 	split DataSplit,
 	keyFields []schema.DataField,
 	readFields []schema.DataField,

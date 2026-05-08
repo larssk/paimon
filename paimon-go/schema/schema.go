@@ -140,7 +140,11 @@ func baseTypeName(s string) string {
 	return upper
 }
 
-// DataField is a named, typed field in a schema.
+// DataField is a named, typed column in a table schema.
+//
+// ID is the stable field identifier used for schema evolution — it never
+// changes even if the field is renamed or reordered. Name is the column name
+// as visible to callers.
 type DataField struct {
 	ID          int      `json:"id"`
 	Name        string   `json:"name"`
@@ -148,17 +152,39 @@ type DataField struct {
 	Description string   `json:"description,omitempty"`
 }
 
-// TableSchema is the JSON representation of a Paimon schema file.
+// TableSchema is the JSON representation of a Paimon schema file
+// (stored at schema/<id> inside the table directory).
+//
+// Version indicates the Paimon schema-file format version; defaults that
+// depend on version (e.g. file format) are applied automatically when the
+// schema is loaded. ID is the monotonically increasing schema ID; it advances
+// each time the schema is altered via ALTER TABLE.
+//
+// Fields lists all columns in declaration order. PartitionKeys and PrimaryKeys
+// are field names (not IDs); use [TableSchema.PartitionFields] and
+// [TableSchema.PrimaryKeyFields] for typed access.
+//
+// Options mirrors the table's WITH(...) properties and is keyed by the Paimon
+// option name (e.g. "merge-engine", "file.format").
 type TableSchema struct {
-	Version        int               `json:"version"`
-	ID             int64             `json:"id"`
-	Fields         []DataField       `json:"fields"`
-	HighestFieldID int               `json:"highestFieldId"`
-	PartitionKeys  []string          `json:"partitionKeys"`
-	PrimaryKeys    []string          `json:"primaryKeys"`
-	Options        map[string]string `json:"options"`
-	Comment        string            `json:"comment,omitempty"`
-	TimeMillis     int64             `json:"timeMillis,omitempty"`
+	// Version is the schema-file format version (0, 1, or 2).
+	Version int `json:"version"`
+	// ID is the schema's monotonically increasing identifier.
+	ID int64 `json:"id"`
+	// Fields lists all columns in declaration order.
+	Fields []DataField `json:"fields"`
+	// HighestFieldID is the largest field ID ever assigned; used for schema evolution.
+	HighestFieldID int `json:"highestFieldId"`
+	// PartitionKeys are the names of the partition columns (empty for unpartitioned tables).
+	PartitionKeys []string `json:"partitionKeys"`
+	// PrimaryKeys are the names of the primary key columns (empty for append-only tables).
+	PrimaryKeys []string `json:"primaryKeys"`
+	// Options holds the table's WITH(...) properties, e.g. "merge-engine": "deduplicate".
+	Options map[string]string `json:"options"`
+	// Comment is an optional human-readable table description.
+	Comment string `json:"comment,omitempty"`
+	// TimeMillis is the epoch-millisecond timestamp when this schema was created.
+	TimeMillis int64 `json:"timeMillis,omitempty"`
 }
 
 // IsPrimaryKeyTable returns true if the table has primary keys defined.
