@@ -166,6 +166,30 @@ func (s *TableSchema) IsPrimaryKeyTable() bool {
 	return len(s.PrimaryKeys) > 0
 }
 
+// MergeEngine returns the merge engine name from table options,
+// defaulting to "deduplicate" if not set.
+func (s *TableSchema) MergeEngine() string {
+	if v, ok := s.Options["merge-engine"]; ok && v != "" {
+		return strings.ToLower(v)
+	}
+	return "deduplicate"
+}
+
+// PrimaryKeyIndices returns the integer positions of each primary key field
+// within the TableSchema.Fields slice.
+func (s *TableSchema) PrimaryKeyIndices() []int {
+	idx := make([]int, 0, len(s.PrimaryKeys))
+	for _, pkName := range s.PrimaryKeys {
+		for i, f := range s.Fields {
+			if f.Name == pkName {
+				idx = append(idx, i)
+				break
+			}
+		}
+	}
+	return idx
+}
+
 // FileFormat returns the data file format, defaulting to "orc" for v<=2 schemas.
 func (s *TableSchema) FileFormat() string {
 	if f, ok := s.Options["file.format"]; ok {

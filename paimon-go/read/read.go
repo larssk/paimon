@@ -34,15 +34,103 @@ func (tr *TableRead) ToArrowReader(ctx context.Context, splits []DataSplit) (arr
 		return nil, fmt.Errorf("read: build arrow schema: %w", err)
 	}
 
-	return &splitRecordReader{
+	return &multiSplitReader{
 		ctx:         ctx,
 		tr:          tr,
 		splits:      splits,
 		readFields:  readFields,
 		arrowSchema: arrowSchema,
-		splitIdx:    0,
-		fileIdx:     0,
 		alloc:       memory.NewGoAllocator(),
+	}, nil
+}
+
+// multiSplitReader iterates over splits, dispatching each to either the append
+// path (splitRecordReader) or the PK merge path (sortMergeReader).
+type multiSplitReader struct {
+	ctx         context.Context
+	tr          *TableRead
+	splits      []DataSplit
+	readFields  []schema.DataField
+	arrowSchema *arrow.Schema
+	alloc       memory.Allocator
+
+	splitIdx int
+	current  array.RecordReader // active sub-reader for the current split
+
+	currentBatch arrow.RecordBatch
+	currentErr   error
+}
+
+func (m *multiSplitReader) Schema() *arrow.Schema { return m.arrowSchema }
+func (m *multiSplitReader) Retain()               {}
+func (m *multiSplitReader) Release() {
+	if m.currentBatch != nil {
+		m.currentBatch.Release()
+		m.currentBatch = nil
+	}
+	if m.current != nil {
+		m.current.Release()
+		m.current = nil
+	}
+}
+func (m *multiSplitReader) RecordBatch() arrow.RecordBatch { return m.currentBatch }
+func (m *multiSplitReader) Record() arrow.RecordBatch      { return m.currentBatch }
+func (m *multiSplitReader) Err() error                     { return m.currentErr }
+
+func (m *multiSplitReader) Next() bool {
+	if m.currentBatch != nil {
+		m.currentBatch.Release()
+		m.currentBatch = nil
+	}
+	for {
+		if m.current != nil {
+			if m.current.Next() {
+				m.currentBatch = m.current.RecordBatch()
+				m.currentBatch.Retain()
+				return true
+			}
+			if err := m.current.Err(); err != nil {
+				m.currentErr = err
+				return false
+			}
+			m.current.Release()
+			m.current = nil
+		}
+		if m.splitIdx >= len(m.splits) {
+			return false
+		}
+		split := m.splits[m.splitIdx]
+		m.splitIdx++
+		rdr, err := m.openSplit(split)
+		if err != nil {
+			m.currentErr = err
+			return false
+		}
+		m.current = rdr
+	}
+}
+
+func (m *multiSplitReader) openSplit(split DataSplit) (array.RecordReader, error) {
+	if split.NeedsMerge {
+		s := m.tr.rb.tbl.GetSchema()
+		return newSortMergeReader(
+			m.ctx,
+			m.tr.rb.tbl,
+			split,
+			s.PrimaryKeyFields(),
+			m.readFields,
+			m.arrowSchema,
+			m.alloc,
+		)
+	}
+	// Append-only path: wrap in a single-split splitRecordReader.
+	return &splitRecordReader{
+		ctx:         m.ctx,
+		tr:          m.tr,
+		splits:      []DataSplit{split},
+		readFields:  m.readFields,
+		arrowSchema: m.arrowSchema,
+		alloc:       m.alloc,
 	}, nil
 }
 

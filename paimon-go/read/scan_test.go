@@ -328,3 +328,62 @@ func TestPlan_ManifestListError(t *testing.T) {
 		t.Errorf("want sentinel error in chain, got: %v", err)
 	}
 }
+
+// TestPlan_NeedsMerge_SetForPKTable verifies that splits for a PK table have NeedsMerge=true.
+func TestPlan_NeedsMerge_SetForPKTable(t *testing.T) {
+	sch := &schema.TableSchema{
+		Fields: []schema.DataField{
+			{ID: 0, Name: "id", Type: schema.DataType{Type: "INT"}},
+			{ID: 1, Name: "val", Type: schema.DataType{Type: "BIGINT"}},
+		},
+		PrimaryKeys: []string{"id"},
+	}
+	tbl := &stubTable{snap: makeSnap(1), sch: sch}
+	entries := []manifest.ManifestEntry{
+		{Kind: manifest.EntryAdd, Bucket: 0, File: manifest.DataFileMeta{FileName: "f.parquet", RowCount: 1}},
+	}
+	mr := &stubManifestReader{
+		listResults:   [][]manifest.ManifestFileMeta{{}, {}},
+		entriesResult: entries,
+	}
+
+	plan, err := newReadBuilderFromIface(tbl, mr).NewScan().Plan(context.Background())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Splits) == 0 {
+		t.Fatal("want at least one split")
+	}
+	for i, s := range plan.Splits {
+		if !s.NeedsMerge {
+			t.Errorf("split %d: want NeedsMerge=true for PK table, got false", i)
+		}
+	}
+}
+
+// TestPlan_NeedsMerge_FalseForAppendTable verifies that splits for an append-only table
+// have NeedsMerge=false.
+func TestPlan_NeedsMerge_FalseForAppendTable(t *testing.T) {
+	sch := intSchema() // no PrimaryKeys
+	tbl := &stubTable{snap: makeSnap(1), sch: sch}
+	entries := []manifest.ManifestEntry{
+		{Kind: manifest.EntryAdd, Bucket: 0, File: manifest.DataFileMeta{FileName: "f.parquet", RowCount: 1}},
+	}
+	mr := &stubManifestReader{
+		listResults:   [][]manifest.ManifestFileMeta{{}, {}},
+		entriesResult: entries,
+	}
+
+	plan, err := newReadBuilderFromIface(tbl, mr).NewScan().Plan(context.Background())
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if len(plan.Splits) == 0 {
+		t.Fatal("want at least one split")
+	}
+	for i, s := range plan.Splits {
+		if s.NeedsMerge {
+			t.Errorf("split %d: want NeedsMerge=false for append-only table, got true", i)
+		}
+	}
+}

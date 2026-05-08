@@ -15,9 +15,10 @@ import (
 // DataSplit represents a unit of work: a set of data files from one bucket/partition
 // that should be read together.
 type DataSplit struct {
-	Partition *manifest.ManifestEntry // representative entry for partition info
-	Bucket    int
-	Files     []manifest.DataFileMeta
+	Partition  *manifest.ManifestEntry // representative entry for partition info
+	Bucket     int
+	Files      []manifest.DataFileMeta
+	NeedsMerge bool // true for primary-key tables that require sort-merge deduplication
 }
 
 // Plan is the output of TableScan.Plan(): a list of splits ready to be read.
@@ -179,6 +180,8 @@ func (ts *TableScan) pruneEntries(entries []manifest.ManifestEntry) []manifest.M
 }
 
 func (ts *TableScan) buildSplits(entries []manifest.ManifestEntry) []DataSplit {
+	isPK := ts.rb.tbl.GetSchema().IsPrimaryKeyTable()
+
 	// Group by bucket key: "partition_path/bucket-N"
 	type key struct {
 		partPath string
@@ -197,9 +200,10 @@ func (ts *TableScan) buildSplits(entries []manifest.ManifestEntry) []DataSplit {
 			files = append(files, e.File)
 		}
 		splits = append(splits, DataSplit{
-			Partition: &group[0],
-			Bucket:    group[0].Bucket,
-			Files:     files,
+			Partition:  &group[0],
+			Bucket:     group[0].Bucket,
+			Files:      files,
+			NeedsMerge: isPK,
 		})
 	}
 	return splits
