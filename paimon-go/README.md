@@ -4,7 +4,8 @@ A minimalistic, pure-Go reader for [Apache Paimon](https://paimon.apache.org/) t
 
 ## Status
 
-Early development — read-only, append-only tables, Parquet data files only.
+Early development — read-only, Parquet data files only.
+Supports both append-only and primary-key tables (deduplicate merge engine).
 
 ## What is included
 
@@ -26,9 +27,9 @@ Early development — read-only, append-only tables, Parquet data files only.
 - **Schema parsing** — reads `schema/schema-<id>` JSON files; handles both plain-string types (`"INT NOT NULL"`, `"VARCHAR(255)"`) and object types (`{"type":"ARRAY","element":"BIGINT"}`); full Paimon type system including DECIMAL precision/scale, TIMESTAMP precision, nested ARRAY / MAP / ROW
 - **Manifest list** — reads `manifest/manifest-list-*` Avro files → `[]ManifestFileMeta` with partition statistics
 - **Manifest entries** — reads `manifest/manifest-*` Avro files in parallel (up to 8 goroutines) → resolves ADD/DELETE pairs → `[]ManifestEntry` with per-file statistics and metadata
-- **BinaryRow decoder** — decodes Paimon's compact binary row format (used for partition min/max statistics); supports all atomic types including inline and heap-allocated strings
+- **BinaryRow decoder** — decodes Paimon's compact binary row format (used for partition min/max statistics and primary-key comparison); supports all atomic types including inline and heap-allocated strings
 
-### Read pipeline
+### Read pipeline — append-only tables
 
 - `ReadBuilder` — entry point; attach filter predicate and/or column projection
 - `TableScan.Plan()` — prunes manifest files and individual data files using partition and column statistics (stats-based pruning via BinaryRow decoded on demand)
@@ -38,6 +39,26 @@ Early development — read-only, append-only tables, Parquet data files only.
 - **Schema evolution / missing columns** — columns present in the schema but absent from a given Parquet file are returned as null arrays
 - **Type compatibility** — handles minor Arrow type mismatches between file physical type and schema type (e.g. `timestamp[us]` vs `timestamp[us, tz=UTC]`)
 
+### Read pipeline — primary-key tables (merge-on-read)
+
+Primary-key tables are detected automatically from the schema (`primaryKeys` field). The full
+merge-on-read pipeline runs transparently inside `ToArrowReader` / `ToArrow` — callers use
+the same API as for append-only tables.
+
+- **`intervalPartition`** — groups files within a bucket by overlapping key ranges into
+  non-overlapping sections; level-0 (overlapping) and level-N (sorted, non-overlapping)
+  files are handled correctly
+- **`sortMergeReader`** — min-heap merge across SortedRuns within each section; advances
+  one row at a time from each run, grouping rows with identical primary keys and picking
+  the winner by highest sequence number
+- **Deduplicate merge engine** — keeps the row with the highest `_SEQUENCE_NUMBER` per
+  primary key; all other merge engine options (`partial-update`, `aggregation`, `first-row`)
+  also apply deduplicate semantics — this matches paimon-python's behaviour
+- **Row-kind filtering** — `UPDATE_BEFORE` (kind=1) and `DELETE` (kind=3) rows are dropped;
+  only `INSERT` (kind=0) and `UPDATE_AFTER` (kind=2) rows are emitted
+- **Output schema** — internal PK columns (`_SEQUENCE_NUMBER`, `_VALUE_KIND`) are stripped;
+  output contains only the user-visible value fields
+
 ### Streaming read
 
 - `StreamReadBuilder` — entry point for continuous reads; attach filter, projection, poll interval, and starting position
@@ -45,6 +66,10 @@ Early development — read-only, append-only tables, Parquet data files only.
 - `TableStreamReader` — implements `array.RecordReader` across an unbounded stream; drives `TableStream` internally and blocks on context cancellation
 - `StartingFromLatest` — skips all existing data; emits only snapshots that arrive after the stream is started
 - `StartingFromEarliest` — replays all existing `APPEND` snapshots from the beginning, then continues polling
+
+> **Note:** Streaming is currently implemented for append-only commits only. PK table
+> streaming reads deduplicated snapshots but does not track changelog semantics across
+> multiple commits.
 
 ### Predicate / filter
 
@@ -77,15 +102,14 @@ Early development — read-only, append-only tables, Parquet data files only.
 
 ### Table types
 
-- **Primary-key (merge-on-read) tables** — requires sort-merge deduplication across files within a bucket, sequence number ordering, and UPDATE_BEFORE / UPDATE_AFTER / DELETE row-kind handling
-- **Deletion vectors** — an alternative compaction strategy for primary-key tables
+- **Deletion vectors** — an alternative compaction strategy for primary-key tables; DV files
+  referenced in `DataFileMeta.ExtraFiles` are not yet decoded or applied
 
 ### Catalog and metadata
 
 - **REST catalog** — only the filesystem catalog is implemented
 - **Tag-based and timestamp-based time travel** — only the latest snapshot is resolved
-- **Streaming / incremental scans** — `StreamReadBuilder`, `TableStream`, and `TableStreamReader` poll for new snapshots and emit only newly added data. Only `APPEND` commits produce splits; `COMPACT` / `OVERWRITE` / `ANALYZE` snapshots are silently skipped so compacted (rewritten) files are never re-emitted. `StartingFromLatest` skips existing data; `StartingFromEarliest` replays from the first snapshot.
-- **Schema evolution (type changes)** — columns added after table creation are null-filled correctly, but type changes are not handled
+- **Schema evolution (type changes)** — columns added after table creation are null-filled correctly, but type changes (e.g. INT → BIGINT) are not handled
 - **Index files** — BTree / full-text / vector global indexes are not read
 
 ### Data formats
@@ -102,6 +126,77 @@ Early development — read-only, append-only tables, Parquet data files only.
 ### Write path
 
 - No `TableWrite`, `FileStoreCommit`, or any mutation operations
+
+---
+
+## Compared to paimon-python
+
+[paimon-python](https://github.com/apache/paimon-python) is the reference Python client
+for Apache Paimon. The table below shows feature parity as of this writing.
+
+| Feature | paimon-go | paimon-python |
+|---|---|---|
+| Append-only table read | ✓ | ✓ |
+| Primary-key table read (deduplicate) | ✓ | ✓ |
+| Aggregation / partial-update merge engines | — (falls back to deduplicate) | — (same) |
+| Deletion vector support | — | ✓ |
+| Filesystem catalog | ✓ | ✓ |
+| REST catalog | — | ✓ |
+| Parquet data files | ✓ | ✓ |
+| ORC data files | — | ✓ |
+| Avro data files | — | ✓ |
+| Lance data files | — | ✓ |
+| Local filesystem | ✓ | ✓ |
+| Google Cloud Storage | ✓ | — |
+| S3 / S3-compatible | — | ✓ |
+| HDFS | — | ✓ |
+| Column projection | ✓ | ✓ |
+| Predicate / filter pushdown | ✓ | ✓ |
+| Stats-based file pruning | ✓ | ✓ |
+| Streaming / incremental reads | ✓ (append-only commits) | — |
+| Time travel (tag / timestamp) | — | ✓ |
+| Schema evolution (added columns) | ✓ (null-filled) | ✓ |
+| Schema evolution (type changes) | — | ✓ |
+| Write path | — (read-only) | ✓ |
+| Output format | Apache Arrow (`arrow.Table` / `array.RecordReader`) | PyArrow / pandas |
+| JVM required | No | No |
+| CGO required | No | No |
+
+> Neither paimon-go nor paimon-python implements aggregation or partial-update merge
+> engines. Both libraries apply deduplicate (latest-value) semantics for all PK table
+> types that are not explicitly handled.
+
+---
+
+## Roadmap
+
+Prioritised next steps, roughly in order:
+
+1. **E2E tests against real fixtures** — integration tests reading tables written by Java
+   or paimon-python to validate the full pipeline end-to-end without mocks. See `TODO.md`
+   for the detailed plan and fixture generation options.
+
+2. **Deletion vector support** — read DV files referenced via `ExtraFiles` in
+   `DataFileMeta`; apply row-level deletes to PK table reads. Required for tables using
+   `'deletion-vectors.enabled' = 'true'`.
+
+3. **S3 / S3-compatible storage** — wire up `gocloud.dev/blob` or `aws-sdk-go-v2`;
+   straightforward addition, no core changes needed.
+
+4. **Time travel** — resolve snapshots by tag name or timestamp rather than always
+   picking the latest.
+
+5. **ORC data files** — blocked on a pure-Go ORC reader with no CGO requirement.
+
+6. **Partition filter pushdown on PK tables** — currently works for append-only;
+   PK-specific predicate pruning tests needed.
+
+7. **REST catalog** — implement `catalog.RESTCatalog` for managed / cloud-hosted
+   Paimon deployments.
+
+8. **Aggregation merge engine** — per-field aggregate functions
+   (`fields.<name>.aggregate-function = sum|max|min|…`) for PK tables that use the
+   aggregation merge engine.
 
 ---
 
@@ -177,6 +272,6 @@ paimon-go/
 ├── read/                   # ReadBuilder, TableScan, TableRead, StreamReadBuilder, TableStream
 ├── predicate/              # Predicate, PredicateBuilder, stats pruning
 └── internal/
-    ├── binaryrow/          # Paimon BinaryRow binary format decoder
+    ├── binaryrow/          # Paimon BinaryRow binary format decoder + key comparator
     └── pathutil/           # URI-safe path joining (handles gs://, s3://)
 ```
